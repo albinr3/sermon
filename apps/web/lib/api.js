@@ -51,11 +51,39 @@ export async function listClips() {
   return apiFetch("/clips");
 }
 
-export async function createClip({ sermon_id, start_ms, end_ms }) {
+export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   return apiFetch("/clips", {
     method: "POST",
-    body: JSON.stringify({ sermon_id, start_ms, end_ms })
+    body: JSON.stringify({ sermon_id, start_ms, end_ms, render_type })
   });
+}
+
+export async function suggestClips(id) {
+  return apiFetch(`/sermons/${id}/suggest`, {
+    method: "POST"
+  });
+}
+
+export async function listSuggestions(id) {
+  return apiFetch(`/sermons/${id}/suggestions`);
+}
+
+export async function acceptSuggestion(clipId) {
+  return apiFetch(`/clips/${clipId}/accept`, {
+    method: "POST"
+  });
+}
+
+export async function renderClip(clipId, renderType) {
+  const params = new URLSearchParams({ type: renderType });
+  return apiFetch(`/clips/${clipId}/render?${params.toString()}`, {
+    method: "POST"
+  });
+}
+
+export async function searchSermon(id, query, k = 10) {
+  const params = new URLSearchParams({ q: query, k: String(k) });
+  return apiFetch(`/sermons/${id}/search?${params.toString()}`);
 }
 
 export async function uploadToPresignedUrl(uploadUrl, file) {

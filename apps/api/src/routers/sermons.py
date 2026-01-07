@@ -1,3 +1,4 @@
+import logging
 import os
 from uuid import uuid4
 
@@ -6,19 +7,33 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.db import get_session
-from src.models import Sermon, SermonStatus, TranscriptSegment
+from src.embeddings import embed_text
+from src.models import (
+    Clip,
+    ClipSource,
+    Sermon,
+    SermonStatus,
+    TranscriptEmbedding,
+    TranscriptSegment,
+)
 from src.schemas import (
+    ClipSuggestionsResponse,
+    EmbedResponse,
+    SearchResponse,
+    SearchResult,
     SermonCreate,
     SermonCreateResponse,
     SermonRead,
     SermonUpdate,
+    SuggestClipsResponse,
     TranscriptSegmentRead,
     UploadCompleteResponse,
 )
-from src.storage import create_presigned_put_url
+from src.storage import create_presigned_get_url, create_presigned_put_url
 from src.celery_app import celery_app
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/", response_model=SermonCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -129,3 +144,120 @@ def upload_complete(
         raise HTTPException(status_code=500, detail="Failed to enqueue transcribe") from exc
 
     return UploadCompleteResponse(sermon=sermon)
+
+
+@router.post(
+    "/{sermon_id}/embed",
+    response_model=EmbedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def embed_sermon(
+    sermon_id: int, session: Session = Depends(get_session)
+) -> EmbedResponse:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    try:
+        celery_app.send_task("worker.generate_embeddings", args=[sermon.id])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Failed to enqueue embeddings"
+        ) from exc
+
+    return EmbedResponse(sermon_id=sermon.id, status="queued")
+
+
+@router.post(
+    "/{sermon_id}/suggest",
+    response_model=SuggestClipsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def suggest_clips(
+    sermon_id: int, session: Session = Depends(get_session)
+) -> SuggestClipsResponse:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    try:
+        celery_app.send_task("worker.suggest_clips", args=[sermon.id])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail="Failed to enqueue clip suggestions"
+        ) from exc
+
+    return SuggestClipsResponse(sermon_id=sermon.id, status="enqueued")
+
+
+@router.get(
+    "/{sermon_id}/suggestions",
+    response_model=ClipSuggestionsResponse,
+)
+def list_suggestions(
+    sermon_id: int, session: Session = Depends(get_session)
+) -> ClipSuggestionsResponse:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    result = session.execute(
+        select(Clip)
+        .where(Clip.sermon_id == sermon_id, Clip.source == ClipSource.auto)
+        .order_by(Clip.score.desc().nullslast(), Clip.id.desc())
+    )
+    clips = list(result.scalars().all())
+    for clip in clips:
+        if clip.output_url:
+            try:
+                clip.download_url = create_presigned_get_url(clip.output_url, 3600)
+            except Exception:
+                logger.exception("Failed to create presigned URL for clip %s", clip.id)
+    return ClipSuggestionsResponse(sermon_id=sermon_id, clips=clips)
+
+
+@router.get(
+    "/{sermon_id}/search",
+    response_model=SearchResponse,
+)
+def search_sermon(
+    sermon_id: int,
+    q: str,
+    k: int = 10,
+    session: Session = Depends(get_session),
+) -> SearchResponse:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    limit = min(max(k, 1), 50)
+
+    query_vector = embed_text(query)
+    stmt = (
+        select(
+            TranscriptEmbedding.segment_id,
+            TranscriptSegment.text,
+            TranscriptSegment.start_ms,
+            TranscriptSegment.end_ms,
+        )
+        .join(
+            TranscriptSegment,
+            TranscriptEmbedding.segment_id == TranscriptSegment.id,
+        )
+        .where(TranscriptEmbedding.sermon_id == sermon_id)
+        .order_by(TranscriptEmbedding.embedding.l2_distance(query_vector))
+        .limit(limit)
+    )
+    rows = session.execute(stmt).all()
+    results = [
+        SearchResult(
+            segment_id=row.segment_id,
+            text=row.text,
+            start_ms=row.start_ms,
+            end_ms=row.end_ms,
+        )
+        for row in rows
+    ]
+    return SearchResponse(sermon_id=sermon_id, query=query, results=results)

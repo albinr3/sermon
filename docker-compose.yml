@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -62,6 +62,30 @@ services:
       - minio
     command: >
       celery -A src.celery_app worker --loglevel=info
+
+  worker-previews:
+    build:
+      context: ./apps/worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    command: >
+      celery -A src.celery_app worker --loglevel=info --queues previews --concurrency=1
+
+  worker-renders:
+    build:
+      context: ./apps/worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    command: >
+      celery -A src.celery_app worker --loglevel=info --queues renders
 
   web:
     build:

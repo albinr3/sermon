@@ -3,8 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    DateTime,
+    Enum as SqlEnum,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -16,6 +26,8 @@ class SermonStatus(str, Enum):
     uploaded = "uploaded"
     processing = "processing"
     transcribed = "transcribed"
+    suggested = "suggested"
+    embedded = "embedded"
     error = "error"
     completed = "completed"
     failed = "failed"
@@ -43,6 +55,21 @@ class ClipStatus(str, Enum):
     error = "error"
 
 
+class ClipSource(str, Enum):
+    manual = "manual"
+    auto = "auto"
+
+
+class ClipReframeMode(str, Enum):
+    center = "center"
+    face = "face"
+
+
+class ClipRenderType(str, Enum):
+    preview = "preview"
+    final = "final"
+
+
 class TranscriptSegment(Base):
     __tablename__ = "transcript_segments"
 
@@ -51,6 +78,27 @@ class TranscriptSegment(Base):
     start_ms: Mapped[int] = mapped_column(Integer)
     end_ms: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+
+
+class TranscriptEmbedding(Base):
+    __tablename__ = "transcript_embeddings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sermon_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    segment_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    text: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(Vector(768))
+
+
+class Template(Base):
+    __tablename__ = "templates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    config_json: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
@@ -66,6 +114,23 @@ class Clip(Base):
     output_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     status: Mapped[ClipStatus] = mapped_column(
         SqlEnum(ClipStatus, name="clip_status"), default=ClipStatus.pending
+    )
+    source: Mapped[ClipSource] = mapped_column(
+        SqlEnum(ClipSource, name="clip_source"),
+        default=ClipSource.manual,
+    )
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("templates.id"), nullable=True
+    )
+    reframe_mode: Mapped[ClipReframeMode] = mapped_column(
+        SqlEnum(ClipReframeMode, name="clip_reframe_mode"),
+        default=ClipReframeMode.center,
+    )
+    render_type: Mapped[ClipRenderType] = mapped_column(
+        SqlEnum(ClipRenderType, name="clip_render_type"),
+        default=ClipRenderType.final,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
