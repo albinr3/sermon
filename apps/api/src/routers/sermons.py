@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from src.config import settings
 from src.db import get_session
 from src.embeddings import embed_text
 from src.models import (
@@ -174,14 +175,23 @@ def embed_sermon(
     status_code=status.HTTP_202_ACCEPTED,
 )
 def suggest_clips(
-    sermon_id: int, session: Session = Depends(get_session)
+    sermon_id: int,
+    use_llm: bool | None = None,
+    session: Session = Depends(get_session),
 ) -> SuggestClipsResponse:
     sermon = session.get(Sermon, sermon_id)
     if not sermon:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     try:
-        celery_app.send_task("worker.suggest_clips", args=[sermon.id])
+        use_llm_effective = (
+            settings.use_llm_for_clip_suggestions if use_llm is None else use_llm
+        )
+        celery_app.send_task(
+            "worker.suggest_clips",
+            args=[sermon.id],
+            kwargs={"use_llm": use_llm_effective},
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail="Failed to enqueue clip suggestions"

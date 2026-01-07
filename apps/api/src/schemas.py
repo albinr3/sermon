@@ -78,6 +78,9 @@ class ClipUpdate(BaseModel):
     source: Optional[ClipSource] = None
     score: Optional[float] = None
     rationale: Optional[str] = None
+    llm_trim: Optional[dict] = None
+    llm_trim_confidence: Optional[float] = None
+    trim_applied: Optional[bool] = None
     template_id: Optional[str] = None
     reframe_mode: Optional[ClipReframeMode] = None
     render_type: Optional[ClipRenderType] = None
@@ -94,6 +97,10 @@ class ClipRead(BaseModel):
     source: ClipSource
     score: Optional[float]
     rationale: Optional[str]
+    use_llm: bool = False
+    llm_trim: Optional[dict] = None
+    llm_trim_confidence: Optional[float] = None
+    trim_applied: bool = False
     template_id: Optional[str]
     reframe_mode: ClipReframeMode
     render_type: ClipRenderType
@@ -111,6 +118,22 @@ class ClipSuggestionsResponse(BaseModel):
 class ClipAcceptResponse(BaseModel):
     suggestion_id: int
     clip: ClipRead
+
+
+class ClipFeedbackCreate(BaseModel):
+    accepted: bool
+    user_id: Optional[str] = None
+
+
+class ClipFeedbackRead(BaseModel):
+    id: int
+    clip_id: int
+    accepted: bool
+    user_id: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class ClipRenderResponse(BaseModel):

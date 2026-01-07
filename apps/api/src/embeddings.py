@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sentence_transformers import SentenceTransformer
 
-MODEL_NAME = "all-mpnet-base-v2"
+MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 _model: SentenceTransformer | None = None
 
 

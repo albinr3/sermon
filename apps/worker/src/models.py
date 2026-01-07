@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     JSON,
+    Boolean,
     String,
     Text,
 )
@@ -90,7 +91,7 @@ class TranscriptEmbedding(Base):
     sermon_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     segment_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     text: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[list[float]] = mapped_column(Vector(768))
+    embedding: Mapped[list[float]] = mapped_column(Vector(384))
 
 
 class Template(Base):
@@ -121,6 +122,10 @@ class Clip(Base):
     )
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    use_llm: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    llm_trim: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    llm_trim_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trim_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     template_id: Mapped[str | None] = mapped_column(
         ForeignKey("templates.id"), nullable=True
     )
@@ -132,6 +137,18 @@ class Clip(Base):
         SqlEnum(ClipRenderType, name="clip_render_type"),
         default=ClipRenderType.final,
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+
+
+class ClipFeedback(Base):
+    __tablename__ = "clip_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    clip_id: Mapped[int] = mapped_column(ForeignKey("clips.id"), index=True)
+    accepted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )

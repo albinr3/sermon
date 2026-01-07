@@ -1,7 +1,7 @@
 # Detalle de funcionamiento
 
 ## Resumen
-La web permite subir sermones en video, transcribirlos automaticamente y crear clips verticales con subtitulos. Los archivos se almacenan en MinIO y la base de datos guarda el estado, progreso y segmentos de transcripcion para monitorear el avance y construir clips descargables.
+La web permite subir sermones en video, transcribirlos automaticamente, generar sugerencias de clips (heuristica o IA opcional), crear clips verticales con subtitulos y buscar segmentos por significado. Los archivos se almacenan en MinIO y la base de datos guarda el estado, progreso y segmentos de transcripcion para monitorear el avance y construir clips descargables.
 
 Este documento describe como funciona la web de Sermon de punta a punta: flujo de subida, transcripcion, clips y servicios involucrados.
 
@@ -41,6 +41,16 @@ Los segmentos guardan:
 
 La UI los muestra para seleccionar rangos de clip.
 
+## Sugerencias de clips (worker)
+Flujo de sugerencias:
+1) La UI llama `POST /sermons/{id}/suggest?use_llm=true|false`.
+2) La API encola `worker.suggest_clips(sermon_id, use_llm)`.
+3) Heuristica: combina segmentos para clips de 30s a 120s, prioriza inicios y finales limpios (silencios/puntuacion) y descarta texto vacio.
+4) Si `use_llm` es true y Deepseek esta configurado, re-scorea candidatos y puede sugerir recortes (`trim_suggestion`). Score final: 0.3 heuristica + 0.7 LLM.
+5) Si Deepseek falla o no esta configurado, se hace fallback a heuristica.
+6) Se deduplica por solapamiento (>60%).
+7) Se guardan en `clips` con `source=auto`, `score`, `rationale` y `use_llm`.
+
 ## Clips (worker)
 Flujo para crear un clip:
 1) La UI envia `POST /clips` con `sermon_id`, `start_ms`, `end_ms`.
@@ -48,19 +58,32 @@ Flujo para crear un clip:
 3) El worker:
    - Descarga el video original.
    - Construye un archivo SRT con los segmentos del rango.
-   - Renderiza con ffmpeg (1080x1920) y subtitulos.
+   - Renderiza con ffmpeg (preview 540x960 o final 1080x1920) y subtitulos.
    - Sube el MP4 generado a MinIO.
    - Guarda `output_url` y marca `status = done`.
 4) La API expone `download_url` (presigned GET) para descargar desde la UI.
 
+## Busqueda semantica (embeddings)
+- La UI puede llamar `POST /sermons/{id}/embed` para generar embeddings.
+- El worker ejecuta `worker.generate_embeddings` con SentenceTransformers (modelo `paraphrase-multilingual-MiniLM-L12-v2`, 384 dims) y guarda en `transcript_embeddings`.
+- `GET /sermons/{id}/search?q=...&k=...` busca segmentos por similitud (pgvector).
+- Si no hay embeddings, la UI dispara el job y muestra un estado de "generando".
+
 ## Estados y progreso
 Sermon (`SermonStatus`):
 - `pending` -> `uploaded` -> `processing` -> `transcribed`
+- `suggested` cuando se generan sugerencias
+- `embedded` cuando se generan embeddings
 - `error` si falla la tarea
 
 Clip (`ClipStatus`):
 - `pending` -> `processing` -> `done`
 - `error` si falla la tarea
+
+Clip (`ClipSource`):
+- `manual` (creado por el usuario)
+- `auto` (sugerencias)
+- `use_llm` indica si el clip sugerido fue re-scoreado por IA
 
 ## API principal
 Rutas principales:
@@ -72,11 +95,16 @@ Rutas principales:
 - `DELETE /sermons/{id}`
 - `POST /sermons/{id}/upload-complete`
 - `GET /sermons/{id}/segments`
+- `POST /sermons/{id}/suggest` (query opcional `use_llm=true|false`)
+- `GET /sermons/{id}/suggestions`
+- `POST /sermons/{id}/embed`
+- `GET /sermons/{id}/search?q=...&k=...`
 - `POST /clips`
 - `GET /clips`
 - `GET /clips/{id}`
 - `PATCH /clips/{id}`
 - `DELETE /clips/{id}`
+- `POST /clips/{id}/render?type=preview|final`
 
 ## Almacenamiento (MinIO)
 - Bucket: `sermon`
@@ -91,7 +119,15 @@ Variables clave:
 - `S3_PUBLIC_ENDPOINT` (endpoint accesible desde el navegador)
 - `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
 - `NEXT_PUBLIC_API_URL`
+- `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
+- `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`
+- `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`)
 
 ## Notas de UX
 - La web hace polling cada 3s cuando un sermon o clip esta en estado activo.
 - El progreso se muestra en el dashboard y en la vista de detalle.
+- En sugerencias, el usuario puede activar "Usar IA para sugerir clips".
+- Las sugerencias con IA muestran un badge "IA".
+- Al generar sugerencias, la UI muestra estado de "Generando sugerencias...".
+- El preview de una sugerencia dispara el render y descarga automaticamente al finalizar.
+- La lista de clips muestra solo clips manuales (se ocultan los `source=auto`).

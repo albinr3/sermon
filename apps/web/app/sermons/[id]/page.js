@@ -5,11 +5,15 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   acceptSuggestion,
+  applyTrimSuggestion,
   createClip,
+  generateEmbeddings,
   getSermon,
   getTranscriptSegments,
+  getClip,
   listClips,
   listSuggestions,
+  recordClipFeedback,
   renderClip,
   searchSermon,
   suggestClips
@@ -42,6 +46,46 @@ function formatClipStatus(status) {
   if (status === "error") return "ERROR";
   return String(status).toUpperCase();
 }
+
+function formatTrimSuggestion(trim) {
+  if (!trim || typeof trim !== "object") return "";
+  const start = Number(trim.start_offset_sec || 0);
+  const end = Number(trim.end_offset_sec || 0);
+  const parts = [];
+  if (Number.isFinite(start) && start > 0) {
+    parts.push(`${Math.round(start)}s del inicio`);
+  }
+  if (Number.isFinite(end) && end !== 0) {
+    parts.push(`${Math.round(Math.abs(end))}s del final`);
+  }
+  if (!parts.length) return "";
+  return `IA sugiere recortar ${parts.join(" y ")}`;
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const pollClipUntilReady = async (clipId, timeoutMs = 180_000) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const clip = await getClip(clipId);
+    if (clip?.status === "done" && (clip.download_url || clip.output_url)) {
+      return clip;
+    }
+    await wait(POLL_INTERVAL_MS);
+  }
+  return null;
+};
+
+const triggerDownload = (url) => {
+  if (!url) return;
+  const link = document.createElement("a");
+  link.href = url;
+  link.rel = "noreferrer";
+  link.download = "";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+};
 
 function ClipBuilder({
   title,
@@ -250,6 +294,10 @@ export default function SermonDetail({ params }) {
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
   const [suggestionsError, setSuggestionsError] = useState("");
   const [suggesting, setSuggesting] = useState(false);
+  const [suggestionsPending, setSuggestionsPending] = useState(false);
+  const [useLlmSuggestions, setUseLlmSuggestions] = useState(
+    process.env.NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS === "true"
+  );
   const [actionLoading, setActionLoading] = useState({});
   const [editingSuggestion, setEditingSuggestion] = useState(null);
   const [suggestionClipMap, setSuggestionClipMap] = useState({});
@@ -257,6 +305,9 @@ export default function SermonDetail({ params }) {
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
+  const [embeddingLoading, setEmbeddingLoading] = useState(false);
+  const [embeddingError, setEmbeddingError] = useState("");
+  const [embeddingRequested, setEmbeddingRequested] = useState(false);
   const [jumpTarget, setJumpTarget] = useState(null);
   const progress =
     typeof sermon?.progress === "number"
@@ -284,6 +335,13 @@ export default function SermonDetail({ params }) {
   }, [sermonId]);
 
   useEffect(() => {
+    setSuggestionsPending(false);
+    setEmbeddingRequested(false);
+    setEmbeddingLoading(false);
+    setEmbeddingError("");
+  }, [sermonId]);
+
+  useEffect(() => {
     if (!sermon || !ACTIVE_STATUSES.has(sermon.status)) {
       return undefined;
     }
@@ -291,6 +349,14 @@ export default function SermonDetail({ params }) {
     const interval = setInterval(fetchSermon, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [sermon]);
+
+  useEffect(() => {
+    if (!embeddingRequested || sermon?.status === "embedded") {
+      return undefined;
+    }
+    const interval = setInterval(fetchSermon, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [embeddingRequested, sermon?.status]);
 
   useEffect(() => {
     if (
@@ -339,7 +405,11 @@ export default function SermonDetail({ params }) {
         setClipsLoading(true);
       }
       const data = await listClips();
-      const filtered = data.filter((clip) => String(clip.sermon_id) === String(sermonId));
+      const filtered = data.filter(
+        (clip) =>
+          String(clip.sermon_id) === String(sermonId) &&
+          String(clip.source) !== "auto"
+      );
       setClips((prev) => (areClipsEqual(prev, filtered) ? prev : filtered));
     } catch (err) {
       setError(isSafeError(err));
@@ -359,8 +429,12 @@ export default function SermonDetail({ params }) {
       const data = await listSuggestions(sermonId);
       setSuggestions(data.clips || []);
       setSuggestionsError("");
+      if ((data.clips || []).length > 0) {
+        setSuggestionsPending(false);
+      }
     } catch (err) {
       setSuggestionsError(isSafeError(err));
+      setSuggestionsPending(false);
     } finally {
       setSuggestionsLoading(false);
     }
@@ -412,11 +486,15 @@ export default function SermonDetail({ params }) {
   const handleSuggest = async () => {
     setSuggesting(true);
     setSuggestionsError("");
+    setSuggestionsPending(true);
+    setSuggestions([]);
+    setSuggestionsLoading(true);
     try {
-      await suggestClips(sermonId);
+      await suggestClips(sermonId, useLlmSuggestions);
       await loadSuggestions();
     } catch (err) {
       setSuggestionsError(isSafeError(err));
+      setSuggestionsPending(false);
     } finally {
       setSuggesting(false);
     }
@@ -456,10 +534,60 @@ export default function SermonDetail({ params }) {
       const manualClipId = await getOrCreateManualClipId(suggestion);
       await renderClip(manualClipId, renderType);
       await loadClips();
+      if (renderType === "preview") {
+        const clip = await pollClipUntilReady(manualClipId);
+        if (clip) {
+          triggerDownload(clip.download_url || clip.output_url);
+        }
+      }
     } catch (err) {
       setError(isSafeError(err));
     } finally {
       setClipActionLoading(suggestion.id, false);
+    }
+  };
+
+  const handleApplyTrim = async (suggestion) => {
+    setClipActionLoading(suggestion.id, true);
+    try {
+      const updated = await applyTrimSuggestion(suggestion.id);
+      setSuggestions((prev) =>
+        prev.map((clip) => (clip.id === updated.id ? updated : clip))
+      );
+    } catch (err) {
+      setError(isSafeError(err));
+    } finally {
+      setClipActionLoading(suggestion.id, false);
+    }
+  };
+
+  const handleReject = async (suggestion) => {
+    setClipActionLoading(suggestion.id, true);
+    try {
+      await recordClipFeedback(suggestion.id, { accepted: false });
+      setSuggestions((prev) =>
+        prev.filter((clip) => String(clip.id) !== String(suggestion.id))
+      );
+    } catch (err) {
+      setError(isSafeError(err));
+    } finally {
+      setClipActionLoading(suggestion.id, false);
+    }
+  };
+
+  const requestEmbeddings = async () => {
+    if (embeddingLoading || sermon?.status === "embedded") {
+      return;
+    }
+    setEmbeddingLoading(true);
+    setEmbeddingError("");
+    try {
+      await generateEmbeddings(sermonId);
+      setEmbeddingRequested(true);
+    } catch (err) {
+      setEmbeddingError(isSafeError(err));
+    } finally {
+      setEmbeddingLoading(false);
     }
   };
 
@@ -469,6 +597,18 @@ export default function SermonDetail({ params }) {
       setSearchResults([]);
       setSearchError("");
       setSearchLoading(false);
+      return;
+    }
+    if (!sermon) {
+      return;
+    }
+    if (sermon.status !== "embedded") {
+      setSearchResults([]);
+      setSearchError("");
+      setSearchLoading(false);
+      if (!embeddingRequested) {
+        requestEmbeddings();
+      }
       return;
     }
     setSearchLoading(true);
@@ -484,7 +624,7 @@ export default function SermonDetail({ params }) {
       }
     }, 300);
     return () => clearTimeout(timeout);
-  }, [searchQuery, sermonId]);
+  }, [searchQuery, sermonId, sermon, embeddingRequested]);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-6 py-16">
@@ -542,6 +682,23 @@ export default function SermonDetail({ params }) {
               Find moments by meaning, not exact words.
             </p>
           </div>
+          {sermon?.status !== "embedded" ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={requestEmbeddings}
+                disabled={embeddingLoading}
+                className="rounded-full border border-slate-800 px-4 py-2 text-xs text-slate-100 hover:border-slate-700 disabled:opacity-50"
+              >
+                {embeddingLoading ? "Generating..." : "Generate embeddings"}
+              </button>
+              {embeddingRequested ? (
+                <span className="text-xs text-slate-500">
+                  Embeddings are running…
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <div className="mt-4">
           <input
@@ -553,7 +710,14 @@ export default function SermonDetail({ params }) {
           />
         </div>
         <div className="mt-4 space-y-3">
-          {searchLoading ? (
+          {embeddingError ? (
+            <p className="text-sm text-red-400">{embeddingError}</p>
+          ) : sermon?.status !== "embedded" ? (
+            <p className="text-sm text-slate-500">
+              Embeddings are required for semantic search.{" "}
+              {embeddingRequested ? "Generating them now..." : "Click to generate."}
+            </p>
+          ) : searchLoading ? (
             <div className="space-y-2">
               <div className="h-4 w-2/3 animate-pulse rounded bg-slate-900" />
               <div className="h-4 w-1/2 animate-pulse rounded bg-slate-900" />
@@ -617,14 +781,32 @@ export default function SermonDetail({ params }) {
               <p className="text-sm font-semibold text-slate-200">Suggested Clips</p>
               <p className="text-xs text-slate-500">Auto-selected ranges.</p>
             </div>
-            <button
-              type="button"
-              onClick={handleSuggest}
-              disabled={suggesting}
-              className="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-100 hover:border-slate-700 disabled:opacity-50"
-            >
-              {suggesting ? "Suggesting..." : "Generate suggestions"}
-            </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-xs text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={useLlmSuggestions}
+                  onChange={(event) => setUseLlmSuggestions(event.target.checked)}
+                  disabled={suggesting}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-emerald-400"
+                />
+                Usar IA para sugerir clips
+              </label>
+              <button
+                type="button"
+                onClick={handleSuggest}
+                disabled={suggesting}
+                className="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-100 hover:border-slate-700 disabled:opacity-50"
+              >
+                {suggesting ? "Suggesting..." : "Generate suggestions"}
+              </button>
+              {suggesting ? (
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-500" />
+                  Generando sugerencias...
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
         <div className="divide-y divide-slate-900 px-6 py-4">
@@ -635,11 +817,17 @@ export default function SermonDetail({ params }) {
             </div>
           ) : suggestionsError ? (
             <p className="text-sm text-red-400">{suggestionsError}</p>
+          ) : suggestionsPending ? (
+            <div className="flex items-center gap-2 text-sm text-slate-500">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-500" />
+              Generando sugerencias...
+            </div>
           ) : suggestions.length === 0 ? (
             <p className="text-sm text-slate-500">No suggestions yet.</p>
           ) : (
             suggestions.map((clip) => {
               const isBusy = Boolean(actionLoading[clip.id]);
+              const trimLabel = formatTrimSuggestion(clip.llm_trim);
               return (
                 <div key={clip.id} className="flex flex-col gap-3 py-4">
                   <div className="flex flex-wrap items-start justify-between gap-4">
@@ -650,11 +838,35 @@ export default function SermonDetail({ params }) {
                       <p className="text-xs text-slate-500">
                         Score {clip.score?.toFixed(2) ?? "0.00"} -{" "}
                         {formatClipStatus(clip.status)}
+                        {clip.use_llm ? (
+                          <span className="ml-2 inline-flex rounded-full border border-emerald-500/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
+                            IA
+                          </span>
+                        ) : null}
                       </p>
                       {clip.rationale ? (
                         <p className="mt-2 text-xs text-slate-400">
                           {clip.rationale}
                         </p>
+                      ) : null}
+                      {trimLabel ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                          <span>{trimLabel}</span>
+                          {clip.trim_applied ? (
+                            <span className="rounded-full border border-emerald-500/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
+                              Recorte aplicado
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleApplyTrim(clip)}
+                              disabled={isBusy}
+                              className="rounded-full border border-emerald-500/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
+                            >
+                              Aplicar
+                            </button>
+                          )}
+                        </div>
                       ) : null}
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -681,6 +893,14 @@ export default function SermonDetail({ params }) {
                         className="rounded-full border border-emerald-500/50 px-3 py-1 text-xs text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
                       >
                         Accept
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleReject(clip)}
+                        disabled={isBusy}
+                        className="rounded-full border border-rose-500/50 px-3 py-1 text-xs text-rose-200 hover:border-rose-400 disabled:opacity-50"
+                      >
+                        Reject
                       </button>
                       <button
                         type="button"

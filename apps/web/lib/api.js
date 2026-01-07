@@ -51,6 +51,10 @@ export async function listClips() {
   return apiFetch("/clips");
 }
 
+export async function getClip(id) {
+  return apiFetch(`/clips/${id}`);
+}
+
 export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   return apiFetch("/clips", {
     method: "POST",
@@ -58,8 +62,19 @@ export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   });
 }
 
-export async function suggestClips(id) {
-  return apiFetch(`/sermons/${id}/suggest`, {
+export async function suggestClips(id, useLlm) {
+  const params = new URLSearchParams();
+  if (typeof useLlm === "boolean") {
+    params.set("use_llm", String(useLlm));
+  }
+  const query = params.toString();
+  return apiFetch(`/sermons/${id}/suggest${query ? `?${query}` : ""}`, {
+    method: "POST"
+  });
+}
+
+export async function generateEmbeddings(id) {
+  return apiFetch(`/sermons/${id}/embed`, {
     method: "POST"
   });
 }
@@ -70,6 +85,19 @@ export async function listSuggestions(id) {
 
 export async function acceptSuggestion(clipId) {
   return apiFetch(`/clips/${clipId}/accept`, {
+    method: "POST"
+  });
+}
+
+export async function recordClipFeedback(clipId, { accepted, user_id } = {}) {
+  return apiFetch(`/clips/${clipId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ accepted, user_id })
+  });
+}
+
+export async function applyTrimSuggestion(clipId) {
+  return apiFetch(`/clips/${clipId}/apply-trim`, {
     method: "POST"
   });
 }

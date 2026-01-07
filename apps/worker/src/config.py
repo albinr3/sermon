@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     s3_bucket: str = "sermon"
     s3_region: str = "us-east-1"
     s3_use_ssl: bool = False
+    use_llm_for_clip_suggestions: bool = False
+    deepseek_api_key: str | None = None
+    deepseek_model: str | None = None
+    deepseek_base_url: str | None = None
 
 
 settings = Settings()
