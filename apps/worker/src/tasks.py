@@ -4,6 +4,7 @@ import re
 import subprocess
 import tempfile
 import unicodedata
+from datetime import datetime
 from uuid import uuid4
 
 from celery.utils.log import get_task_logger
@@ -11,7 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from faster_whisper import WhisperModel
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import delete, select
+from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
 from src.ass import build_ass_from_segments
@@ -334,7 +335,8 @@ def _attach_embeddings(
     segment_ids = [segment.id for segment in segments]
     rows = session.execute(
         select(TranscriptEmbedding.segment_id, TranscriptEmbedding.embedding).where(
-            TranscriptEmbedding.segment_id.in_(segment_ids)
+            TranscriptEmbedding.segment_id.in_(segment_ids),
+            TranscriptEmbedding.deleted_at.is_(None),
         )
     ).all()
     mapping = {row.segment_id: row.embedding for row in rows}
@@ -663,7 +665,7 @@ def _apply_trim_suggestions(
 def _resolve_template_config(session, clip: Clip) -> dict:
     if clip.template_id:
         template = session.get(Template, clip.template_id)
-        if template and template.config_json:
+        if template and template.deleted_at is None and template.config_json:
             return template.config_json
         logger.warning("Template %s not found for clip %s", clip.template_id, clip.id)
     return DEFAULT_TEMPLATE_CONFIG
@@ -681,6 +683,9 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
         sermon = session.get(Sermon, sermon_id)
         if not sermon:
             raise ValueError("Sermon not found")
+        if sermon.deleted_at is not None:
+            logger.info("Sermon %s is deleted; skipping transcription", sermon_id)
+            return {"sermon_id": sermon_id, "status": "deleted"}
         if not sermon.source_url:
             raise ValueError("Sermon has no source_url")
 
@@ -752,6 +757,10 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
 
             session.commit()
 
+        session.refresh(sermon)
+        if sermon.deleted_at is not None:
+            logger.info("Sermon %s deleted during transcription", sermon_id)
+            return {"sermon_id": sermon_id, "status": "deleted"}
         sermon.status = SermonStatus.transcribed
         sermon.progress = 100
         sermon.error_message = None
@@ -782,12 +791,18 @@ def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
         sermon = session.get(Sermon, sermon_id)
         if not sermon:
             raise ValueError("Sermon not found")
+        if sermon.deleted_at is not None:
+            logger.info("Sermon %s is deleted; skipping suggestions", sermon_id)
+            return {"sermon_id": sermon_id, "status": "deleted"}
         sermon.error_message = None
         session.commit()
 
         segments_query = (
             select(TranscriptSegment)
-            .where(TranscriptSegment.sermon_id == sermon_id)
+            .where(
+                TranscriptSegment.sermon_id == sermon_id,
+                TranscriptSegment.deleted_at.is_(None),
+            )
             .order_by(TranscriptSegment.start_ms.asc())
         )
         segments = list(session.execute(segments_query).scalars().all())
@@ -886,10 +901,15 @@ def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
             sermon_id,
         )
 
+        now = datetime.utcnow()
         session.execute(
-            delete(Clip).where(
-                Clip.sermon_id == sermon_id, Clip.source == ClipSource.auto
+            update(Clip)
+            .where(
+                Clip.sermon_id == sermon_id,
+                Clip.source == ClipSource.auto,
+                Clip.deleted_at.is_(None),
             )
+            .values(deleted_at=now, updated_at=now)
         )
 
         created = 0
@@ -913,6 +933,10 @@ def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
 
         session.commit()
 
+        session.refresh(sermon)
+        if sermon.deleted_at is not None:
+            logger.info("Sermon %s deleted during suggestions", sermon_id)
+            return {"sermon_id": sermon_id, "status": "deleted"}
         if created >= MIN_SUGGESTIONS:
             sermon.status = SermonStatus.suggested
         else:
@@ -955,23 +979,33 @@ def generate_embeddings(self, sermon_id: int) -> dict:
         sermon = session.get(Sermon, sermon_id)
         if not sermon:
             raise ValueError("Sermon not found")
+        if sermon.deleted_at is not None:
+            logger.info("Sermon %s is deleted; skipping embeddings", sermon_id)
+            return {"sermon_id": sermon_id, "status": "deleted"}
         sermon.error_message = None
         session.commit()
 
         segments = list(
             session.execute(
                 select(TranscriptSegment)
-                .where(TranscriptSegment.sermon_id == sermon_id)
+                .where(
+                    TranscriptSegment.sermon_id == sermon_id,
+                    TranscriptSegment.deleted_at.is_(None),
+                )
                 .order_by(TranscriptSegment.start_ms.asc())
             ).scalars()
         )
         if not segments:
             raise ValueError("No transcript segments available")
 
+        now = datetime.utcnow()
         session.execute(
-            delete(TranscriptEmbedding).where(
-                TranscriptEmbedding.sermon_id == sermon_id
+            update(TranscriptEmbedding)
+            .where(
+                TranscriptEmbedding.sermon_id == sermon_id,
+                TranscriptEmbedding.deleted_at.is_(None),
             )
+            .values(deleted_at=now, updated_at=now)
         )
         session.commit()
 
@@ -1002,6 +1036,10 @@ def generate_embeddings(self, sermon_id: int) -> dict:
                 sermon_id,
             )
 
+        session.refresh(sermon)
+        if sermon.deleted_at is not None:
+            logger.info("Sermon %s deleted during embeddings", sermon_id)
+            return {"sermon_id": sermon_id, "status": "deleted"}
         sermon.status = SermonStatus.embedded
         sermon.error_message = None
         session.commit()
@@ -1030,11 +1068,11 @@ def render_clip(self, clip_id: int) -> dict:
     clip = None
     try:
         clip = session.get(Clip, clip_id)
-        if not clip:
+        if not clip or clip.deleted_at is not None:
             raise ValueError("Clip not found")
 
         sermon = session.get(Sermon, clip.sermon_id)
-        if not sermon or not sermon.source_url:
+        if not sermon or sermon.deleted_at is not None or not sermon.source_url:
             raise ValueError("Sermon source not available")
 
         if clip.end_ms <= clip.start_ms:
@@ -1048,6 +1086,7 @@ def render_clip(self, clip_id: int) -> dict:
             .where(TranscriptSegment.sermon_id == clip.sermon_id)
             .where(TranscriptSegment.start_ms < clip.end_ms)
             .where(TranscriptSegment.end_ms > clip.start_ms)
+            .where(TranscriptSegment.deleted_at.is_(None))
             .order_by(TranscriptSegment.start_ms.asc())
         )
         segments = list(session.execute(segments_query).scalars().all())

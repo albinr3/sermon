@@ -1,8 +1,16 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=str(ROOT_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     redis_url: str = "redis://localhost:6379/0"
     database_url: str = "postgresql+psycopg2://sermon:sermon@localhost:5432/sermon"
@@ -24,6 +32,11 @@ class Settings(BaseSettings):
     celery_priority_embed: int = 3
     celery_priority_render_preview: int = 8
     celery_priority_render_final: int = 4
+    rate_limit_enabled: bool = True
+    rate_limit_default: str = "60/minute"
+    log_level: str = "INFO"
+    log_json: bool = True
+    healthcheck_timeout_sec: float = 2.0
 
 
 settings = Settings()

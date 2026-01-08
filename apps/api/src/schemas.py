@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from src.models import (
     ClipReframeMode,
@@ -14,38 +14,46 @@ from src.models import (
 )
 
 
-class SermonCreate(BaseModel):
+class StrictBaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class ORMModel(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, from_attributes=True)
+
+
+class SermonCreate(StrictBaseModel):
     title: Optional[str] = None
     filename: Optional[str] = None
 
 
-class SermonUpdate(BaseModel):
+class SermonUpdate(StrictBaseModel):
     title: Optional[str] = None
     source_url: Optional[str] = None
     status: Optional[SermonStatus] = None
 
 
-class SermonCreateResponse(BaseModel):
+class SermonCreateResponse(StrictBaseModel):
     sermon: SermonRead
     upload_url: str
     object_key: str
 
 
-class UploadCompleteResponse(BaseModel):
+class UploadCompleteResponse(StrictBaseModel):
     sermon: SermonRead
 
 
-class SuggestClipsResponse(BaseModel):
+class SuggestClipsResponse(StrictBaseModel):
     sermon_id: int
     status: str
 
 
-class EmbedResponse(BaseModel):
+class EmbedResponse(StrictBaseModel):
     sermon_id: int
     status: str
 
 
-class SermonRead(BaseModel):
+class SermonRead(ORMModel):
     id: int
     title: Optional[str]
     source_url: Optional[str]
@@ -53,12 +61,11 @@ class SermonRead(BaseModel):
     status: SermonStatus
     error_message: Optional[str] = None
     created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
-
-class ClipCreate(BaseModel):
+class ClipCreate(StrictBaseModel):
     sermon_id: int
     start_ms: int
     end_ms: int
@@ -70,7 +77,7 @@ class ClipCreate(BaseModel):
     render_type: Optional[ClipRenderType] = None
 
 
-class ClipUpdate(BaseModel):
+class ClipUpdate(StrictBaseModel):
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
     status: Optional[ClipStatus] = None
@@ -86,7 +93,7 @@ class ClipUpdate(BaseModel):
     render_type: Optional[ClipRenderType] = None
 
 
-class ClipRead(BaseModel):
+class ClipRead(ORMModel):
     id: int
     sermon_id: int
     start_ms: int
@@ -105,69 +112,66 @@ class ClipRead(BaseModel):
     reframe_mode: ClipReframeMode
     render_type: ClipRenderType
     created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
-
-class ClipSuggestionsResponse(BaseModel):
+class ClipSuggestionsResponse(StrictBaseModel):
     sermon_id: int
     clips: list[ClipRead]
 
 
-class ClipAcceptResponse(BaseModel):
+class ClipAcceptResponse(StrictBaseModel):
     suggestion_id: int
     clip: ClipRead
 
 
-class ClipFeedbackCreate(BaseModel):
+class ClipFeedbackCreate(StrictBaseModel):
     accepted: bool
     user_id: Optional[str] = None
 
 
-class ClipFeedbackRead(BaseModel):
+class ClipFeedbackRead(ORMModel):
     id: int
     clip_id: int
     accepted: bool
     user_id: Optional[str] = None
     created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
-
-class ClipRenderResponse(BaseModel):
+class ClipRenderResponse(StrictBaseModel):
     clip_id: int
     status: str
     render_type: ClipRenderType
 
 
-class TranscriptSegmentRead(BaseModel):
+class TranscriptSegmentRead(ORMModel):
     id: int
     sermon_id: int
     start_ms: int
     end_ms: int
     text: str
     created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
 
-
-class SearchResult(BaseModel):
+class SearchResult(StrictBaseModel):
     segment_id: int
     text: str
     start_ms: int
     end_ms: int
 
 
-class SearchResponse(BaseModel):
+class SearchResponse(StrictBaseModel):
     sermon_id: int
     query: str
     results: list[SearchResult]
 
 
-class TemplateConfig(BaseModel):
+class TemplateConfig(StrictBaseModel):
     font: str
     font_size: int
     y_pos: int
@@ -176,17 +180,16 @@ class TemplateConfig(BaseModel):
     safe_margins: dict
 
 
-class TemplateCreate(BaseModel):
+class TemplateCreate(StrictBaseModel):
     id: str
     name: str
     config_json: TemplateConfig
 
 
-class TemplateRead(BaseModel):
+class TemplateRead(ORMModel):
     id: str
     name: str
     config_json: TemplateConfig
     created_at: datetime
-
-    class Config:
-        from_attributes = True
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None

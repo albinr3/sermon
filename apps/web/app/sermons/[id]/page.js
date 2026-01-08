@@ -1,16 +1,18 @@
 "use client";
 
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   acceptSuggestion,
   applyTrimSuggestion,
   createClip,
   generateEmbeddings,
+  getClip,
   getSermon,
   getTranscriptSegments,
-  getClip,
   listClips,
   listSuggestions,
   recordClipFeedback,
@@ -19,9 +21,26 @@ import {
   suggestClips
 } from "../../../lib/api";
 
+const ClipBuilder = dynamic(() => import("./components/ClipBuilder"), {
+  loading: () => (
+    <section className="rounded-2xl border border-slate-800 bg-slate-950/50">
+      <div className="h-48 animate-pulse rounded-2xl bg-slate-900/60" />
+    </section>
+  )
+});
+
+const SuggestedClipsPanel = dynamic(
+  () => import("./components/SuggestedClipsPanel"),
+  {
+    loading: () => (
+      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
+        <div className="h-6 w-48 animate-pulse rounded bg-slate-900" />
+      </section>
+    )
+  }
+);
+
 const POLL_INTERVAL_MS = 3000;
-const MIN_DURATION_MS = 10_000;
-const MAX_DURATION_MS = 120_000;
 const ACTIVE_STATUSES = new Set(["pending", "processing", "uploaded"]);
 const CLIP_ACTIVE_STATUSES = new Set(["pending", "processing"]);
 
@@ -87,214 +106,12 @@ const triggerDownload = (url) => {
   link.remove();
 };
 
-function ClipBuilder({
-  title,
-  subtitle,
-  segments,
-  initialStartMs,
-  initialEndMs,
-  actionLabel,
-  busyLabel,
-  onSubmit,
-  onCancel
-}) {
-  const [selection, setSelection] = useState({ startIndex: null, endIndex: null });
-  const [clipError, setClipError] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    setSelection({ startIndex: null, endIndex: null });
-    setClipError("");
-    if (!segments.length) {
-      return;
-    }
-    if (initialStartMs === null || initialEndMs === null) {
-      return;
-    }
-    let startIndex = segments.findIndex(
-      (segment) =>
-        segment.start_ms <= initialStartMs && segment.end_ms >= initialStartMs
-    );
-    if (startIndex === -1) {
-      startIndex = segments.findIndex((segment) => segment.start_ms >= initialStartMs);
-    }
-    if (startIndex === -1) {
-      startIndex = 0;
-    }
-
-    let endIndex = -1;
-    for (let i = segments.length - 1; i >= 0; i -= 1) {
-      const segment = segments[i];
-      if (segment.start_ms <= initialEndMs && segment.end_ms >= initialEndMs) {
-        endIndex = i;
-        break;
-      }
-    }
-    if (endIndex === -1) {
-      endIndex = segments.findIndex((segment) => segment.end_ms >= initialEndMs);
-    }
-    if (endIndex === -1) {
-      endIndex = segments.length - 1;
-    }
-    setSelection({ startIndex, endIndex });
-  }, [segments, initialStartMs, initialEndMs]);
-
-  const selectionReady =
-    selection.startIndex !== null && selection.endIndex !== null && segments.length > 0;
-
-  const selectionRange = selectionReady
-    ? [
-        Math.min(selection.startIndex, selection.endIndex),
-        Math.max(selection.startIndex, selection.endIndex)
-      ]
-    : null;
-
-  const selectionSegments = selectionRange
-    ? segments.slice(selectionRange[0], selectionRange[1] + 1)
-    : [];
-
-  const selectionStartMs = selectionSegments.length
-    ? selectionSegments[0].start_ms
-    : null;
-  const selectionEndMs = selectionSegments.length
-    ? selectionSegments[selectionSegments.length - 1].end_ms
-    : null;
-  const selectionDurationMs =
-    selectionStartMs !== null && selectionEndMs !== null
-      ? selectionEndMs - selectionStartMs
-      : 0;
-
-  const handleSegmentClick = (index) => {
-    setClipError("");
-    if (selection.startIndex === null || selection.endIndex !== null) {
-      setSelection({ startIndex: index, endIndex: null });
-      return;
-    }
-    setSelection((prev) => ({ ...prev, endIndex: index }));
-  };
-
-  const handleSubmit = async () => {
-    if (!selectionReady || selectionStartMs === null || selectionEndMs === null) {
-      setClipError("Select a start and end segment first.");
-      return;
-    }
-
-    if (selectionDurationMs < MIN_DURATION_MS) {
-      setClipError("Clip must be at least 10 seconds.");
-      return;
-    }
-
-    if (selectionDurationMs > MAX_DURATION_MS) {
-      setClipError("Clip must be at most 120 seconds.");
-      return;
-    }
-
-    setIsSubmitting(true);
-    setClipError("");
-    try {
-      await onSubmit({
-        start_ms: selectionStartMs,
-        end_ms: selectionEndMs
-      });
-      setSelection({ startIndex: null, endIndex: null });
-    } catch (err) {
-      setClipError(isSafeError(err));
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-950/50">
-      <div className="border-b border-slate-800 px-6 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold text-slate-200">{title}</p>
-            {subtitle ? <p className="text-xs text-slate-500">{subtitle}</p> : null}
-          </div>
-          {onCancel ? (
-            <button
-              type="button"
-              onClick={onCancel}
-              className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-300 hover:border-slate-700"
-            >
-              Cancel
-            </button>
-          ) : null}
-        </div>
-      </div>
-      <div className="space-y-3 px-6 py-4">
-        {segments.length === 0 ? (
-          <p className="text-sm text-slate-500">No segments available.</p>
-        ) : (
-          <div className="space-y-3">
-            {segments.map((segment, index) => {
-              const isSelected =
-                selectionRange &&
-                index >= selectionRange[0] &&
-                index <= selectionRange[1];
-              return (
-                <button
-                  key={segment.id}
-                  type="button"
-                  onClick={() => handleSegmentClick(index)}
-                  className={`w-full rounded-lg border p-3 text-left transition ${
-                    isSelected
-                      ? "border-emerald-500/70 bg-emerald-500/10"
-                      : "border-slate-800 hover:border-slate-700"
-                  }`}
-                >
-                  <p className="text-xs text-slate-500">
-                    {segment.start_ms}ms - {segment.end_ms}ms
-                  </p>
-                  <p className="text-sm text-slate-200">{segment.text}</p>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-      <div className="border-t border-slate-800 px-6 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="text-sm text-slate-400">
-            {selectionReady ? (
-              <span>
-                Range: {selectionStartMs}ms - {selectionEndMs}ms (
-                {Math.round(selectionDurationMs / 1000)}s)
-              </span>
-            ) : (
-              <span>No range selected.</span>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={isSubmitting}
-            className="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-100 hover:border-slate-700 disabled:opacity-50"
-          >
-            {isSubmitting ? busyLabel : actionLabel}
-          </button>
-        </div>
-        {clipError ? <p className="mt-2 text-sm text-red-400">{clipError}</p> : null}
-      </div>
-    </section>
-  );
-}
-
 export default function SermonDetail({ params }) {
   const sermonId = params.id;
-  const [sermon, setSermon] = useState(null);
-  const [segments, setSegments] = useState([]);
-  const [clips, setClips] = useState([]);
-  const [clipsLoading, setClipsLoading] = useState(true);
-  const hasLoadedClips = useRef(false);
+  const queryClient = useQueryClient();
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [suggestions, setSuggestions] = useState([]);
-  const [suggestionsLoading, setSuggestionsLoading] = useState(true);
-  const [suggestionsError, setSuggestionsError] = useState("");
-  const [suggesting, setSuggesting] = useState(false);
   const [suggestionsPending, setSuggestionsPending] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState("");
   const [useLlmSuggestions, setUseLlmSuggestions] = useState(
     process.env.NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS === "true"
   );
@@ -302,174 +119,190 @@ export default function SermonDetail({ params }) {
   const [editingSuggestion, setEditingSuggestion] = useState(null);
   const [suggestionClipMap, setSuggestionClipMap] = useState({});
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState("");
-  const [embeddingLoading, setEmbeddingLoading] = useState(false);
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [embeddingError, setEmbeddingError] = useState("");
   const [embeddingRequested, setEmbeddingRequested] = useState(false);
   const [jumpTarget, setJumpTarget] = useState(null);
+
+  useEffect(() => {
+    setSuggestionClipMap({});
+    setSuggestionsPending(false);
+    setSuggestionsError("");
+    setEmbeddingRequested(false);
+    setEmbeddingError("");
+    setEditingSuggestion(null);
+    setJumpTarget(null);
+    setError("");
+  }, [sermonId]);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setDebouncedQuery("");
+      return;
+    }
+    const timeout = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(timeout);
+  }, [searchQuery]);
+
+  const sermonQuery = useQuery({
+    queryKey: ["sermon", sermonId],
+    queryFn: () => getSermon(sermonId),
+    refetchInterval: (query) => {
+      const sermon = query.state.data;
+      if (!sermon) {
+        return false;
+      }
+      if (ACTIVE_STATUSES.has(sermon.status)) {
+        return POLL_INTERVAL_MS;
+      }
+      if (embeddingRequested && sermon.status !== "embedded") {
+        return POLL_INTERVAL_MS;
+      }
+      return false;
+    }
+  });
+
+  const sermon = sermonQuery.data ?? null;
+  const loading = sermonQuery.isLoading;
+  const statusError = error || sermonQuery.error?.message || "";
   const progress =
     typeof sermon?.progress === "number"
       ? Math.min(100, Math.max(0, sermon.progress))
       : null;
 
-  const fetchSermon = async () => {
-    try {
-      const data = await getSermon(sermonId);
-      setSermon(data);
-      setError("");
-    } catch (err) {
-      setError(isSafeError(err));
-    } finally {
-      setLoading(false);
-    }
-  };
+  const segmentsQuery = useQuery({
+    queryKey: ["segments", sermonId],
+    queryFn: () => getTranscriptSegments(sermonId),
+    enabled:
+      Boolean(sermon) &&
+      ["transcribed", "suggested", "completed", "embedded"].includes(
+        sermon.status
+      )
+  });
+  const segments = segmentsQuery.data || [];
 
-  useEffect(() => {
-    fetchSermon();
-  }, [sermonId]);
-
-  useEffect(() => {
-    setSuggestionClipMap({});
-  }, [sermonId]);
-
-  useEffect(() => {
-    setSuggestionsPending(false);
-    setEmbeddingRequested(false);
-    setEmbeddingLoading(false);
-    setEmbeddingError("");
-  }, [sermonId]);
-
-  useEffect(() => {
-    if (!sermon || !ACTIVE_STATUSES.has(sermon.status)) {
-      return undefined;
-    }
-
-    const interval = setInterval(fetchSermon, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [sermon]);
-
-  useEffect(() => {
-    if (!embeddingRequested || sermon?.status === "embedded") {
-      return undefined;
-    }
-    const interval = setInterval(fetchSermon, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [embeddingRequested, sermon?.status]);
-
-  useEffect(() => {
-    if (
-      !sermon ||
-      !["transcribed", "suggested", "completed", "embedded"].includes(sermon.status)
-    ) {
-      return;
-    }
-
-    const loadSegments = async () => {
-      try {
-        const data = await getTranscriptSegments(sermonId);
-        setSegments(data);
-      } catch (err) {
-        setError(isSafeError(err));
-      }
-    };
-
-    loadSegments();
-  }, [sermon, sermonId]);
-
-  const areClipsEqual = (prevClips, nextClips) => {
-    if (prevClips.length !== nextClips.length) {
-      return false;
-    }
-    for (let i = 0; i < prevClips.length; i += 1) {
-      const prev = prevClips[i];
-      const next = nextClips[i];
-      if (!prev || !next) {
-        return false;
-      }
-      if (
-        prev.id !== next.id ||
-        prev.status !== next.status ||
-        prev.output_url !== next.output_url
-      ) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const loadClips = async () => {
-    try {
-      if (!hasLoadedClips.current) {
-        setClipsLoading(true);
-      }
+  const clipsQuery = useQuery({
+    queryKey: ["clips", sermonId],
+    queryFn: async () => {
       const data = await listClips();
-      const filtered = data.filter(
+      return data.filter(
         (clip) =>
           String(clip.sermon_id) === String(sermonId) &&
           String(clip.source) !== "auto"
       );
-      setClips((prev) => (areClipsEqual(prev, filtered) ? prev : filtered));
-    } catch (err) {
-      setError(isSafeError(err));
-    } finally {
-      if (!hasLoadedClips.current) {
-        hasLoadedClips.current = true;
-        setClipsLoading(false);
+    },
+    refetchInterval: (query) => {
+      const clips = query.state.data || [];
+      if (clips.length === 0) {
+        return POLL_INTERVAL_MS;
       }
+      const shouldPoll = clips.some((clip) =>
+        CLIP_ACTIVE_STATUSES.has(clip.status)
+      );
+      return shouldPoll ? POLL_INTERVAL_MS : false;
+    }
+  });
+  const clips = clipsQuery.data || [];
+  const clipsLoading = clipsQuery.isLoading;
+
+  const suggestionsQuery = useQuery({
+    queryKey: ["suggestions", sermonId],
+    queryFn: () => listSuggestions(sermonId),
+    refetchInterval: (query) => {
+      const clips = query.state.data?.clips || [];
+      if (clips.length === 0) {
+        return POLL_INTERVAL_MS;
+      }
+      const shouldPoll = clips.some((clip) =>
+        CLIP_ACTIVE_STATUSES.has(clip.status)
+      );
+      return shouldPoll ? POLL_INTERVAL_MS : false;
+    }
+  });
+  const suggestions = suggestionsQuery.data?.clips || [];
+  const suggestionsLoading = suggestionsQuery.isLoading;
+  const suggestionsErrorMessage =
+    suggestionsError || suggestionsQuery.error?.message || "";
+
+  useEffect(() => {
+    if (suggestions.length > 0) {
+      setSuggestionsPending(false);
+    }
+  }, [suggestions.length]);
+
+  useEffect(() => {
+    if (suggestionsQuery.isError) {
+      setSuggestionsPending(false);
+    }
+  }, [suggestionsQuery.isError]);
+
+  const embeddingMutation = useMutation({
+    mutationFn: () => generateEmbeddings(sermonId),
+    onSuccess: () => {
+      setEmbeddingRequested(true);
+    },
+    onError: (err) => {
+      setEmbeddingError(isSafeError(err));
+    }
+  });
+  const embeddingLoading = embeddingMutation.isPending;
+
+  const requestEmbeddings = async () => {
+    if (embeddingLoading || sermon?.status === "embedded") {
+      return;
+    }
+    setEmbeddingError("");
+    try {
+      await embeddingMutation.mutateAsync();
+    } catch (err) {
+      setEmbeddingError(isSafeError(err));
     }
   };
 
-  const loadSuggestions = async () => {
-    try {
-      if (!suggestions.length) {
-        setSuggestionsLoading(true);
-      }
-      const data = await listSuggestions(sermonId);
-      setSuggestions(data.clips || []);
+  const searchQueryResult = useQuery({
+    queryKey: ["search", sermonId, debouncedQuery],
+    queryFn: () => searchSermon(sermonId, debouncedQuery, 10),
+    enabled: Boolean(debouncedQuery) && sermon?.status === "embedded"
+  });
+  const hasSearchInput = searchQuery.trim().length > 0;
+  const searchResults = searchQueryResult.data?.results || [];
+  const searchLoading =
+    hasSearchInput && (debouncedQuery ? searchQueryResult.isFetching : true);
+  const searchError =
+    hasSearchInput && debouncedQuery
+      ? searchQueryResult.error?.message || ""
+      : "";
+
+  const suggestMutation = useMutation({
+    mutationFn: () => suggestClips(sermonId, useLlmSuggestions),
+    onMutate: () => {
+      setSuggestionsPending(true);
       setSuggestionsError("");
-      if ((data.clips || []).length > 0) {
-        setSuggestionsPending(false);
-      }
-    } catch (err) {
+      queryClient.setQueryData(["suggestions", sermonId], {
+        sermon_id: Number(sermonId),
+        clips: []
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["suggestions", sermonId] });
+    },
+    onError: (err) => {
       setSuggestionsError(isSafeError(err));
       setSuggestionsPending(false);
-    } finally {
-      setSuggestionsLoading(false);
     }
-  };
+  });
+  const suggesting = suggestMutation.isPending;
 
   useEffect(() => {
-    hasLoadedClips.current = false;
-    setClipsLoading(true);
-    loadClips();
-  }, [sermonId]);
-
-  useEffect(() => {
-    const shouldPoll =
-      clips.length === 0 || clips.some((clip) => CLIP_ACTIVE_STATUSES.has(clip.status));
-    if (!shouldPoll) {
-      return undefined;
+    const query = searchQuery.trim();
+    if (!query || !sermon || sermon.status === "embedded") {
+      return;
     }
-    const interval = setInterval(loadClips, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [sermonId, clips]);
-
-  useEffect(() => {
-    loadSuggestions();
-  }, [sermonId]);
-
-  useEffect(() => {
-    const shouldPoll =
-      suggestions.length === 0 ||
-      suggestions.some((clip) => CLIP_ACTIVE_STATUSES.has(clip.status));
-    if (!shouldPoll) {
-      return undefined;
+    if (!embeddingRequested && !embeddingLoading) {
+      requestEmbeddings();
     }
-    const interval = setInterval(loadSuggestions, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [sermonId, suggestions]);
+  }, [searchQuery, sermon, embeddingRequested, embeddingLoading]);
 
   const handleCreateClip = async ({ start_ms, end_ms, render_type }) => {
     const clip = await createClip({
@@ -479,25 +312,12 @@ export default function SermonDetail({ params }) {
       render_type
     });
     await renderClip(clip.id, render_type || "final");
-    await loadClips();
+    await queryClient.invalidateQueries({ queryKey: ["clips", sermonId] });
     return clip;
   };
 
-  const handleSuggest = async () => {
-    setSuggesting(true);
-    setSuggestionsError("");
-    setSuggestionsPending(true);
-    setSuggestions([]);
-    setSuggestionsLoading(true);
-    try {
-      await suggestClips(sermonId, useLlmSuggestions);
-      await loadSuggestions();
-    } catch (err) {
-      setSuggestionsError(isSafeError(err));
-      setSuggestionsPending(false);
-    } finally {
-      setSuggesting(false);
-    }
+  const handleSuggest = () => {
+    suggestMutation.mutate();
   };
 
   const setClipActionLoading = (clipId, value) => {
@@ -512,6 +332,7 @@ export default function SermonDetail({ params }) {
     const response = await acceptSuggestion(suggestion.id);
     const manualClipId = response.clip.id;
     setSuggestionClipMap((prev) => ({ ...prev, [suggestion.id]: manualClipId }));
+    await queryClient.invalidateQueries({ queryKey: ["clips", sermonId] });
     return manualClipId;
   };
 
@@ -520,7 +341,7 @@ export default function SermonDetail({ params }) {
     try {
       const manualClipId = await getOrCreateManualClipId(suggestion);
       await renderClip(manualClipId, "preview");
-      await loadClips();
+      await queryClient.invalidateQueries({ queryKey: ["clips", sermonId] });
     } catch (err) {
       setError(isSafeError(err));
     } finally {
@@ -533,7 +354,7 @@ export default function SermonDetail({ params }) {
     try {
       const manualClipId = await getOrCreateManualClipId(suggestion);
       await renderClip(manualClipId, renderType);
-      await loadClips();
+      await queryClient.invalidateQueries({ queryKey: ["clips", sermonId] });
       if (renderType === "preview") {
         const clip = await pollClipUntilReady(manualClipId);
         if (clip) {
@@ -551,9 +372,15 @@ export default function SermonDetail({ params }) {
     setClipActionLoading(suggestion.id, true);
     try {
       const updated = await applyTrimSuggestion(suggestion.id);
-      setSuggestions((prev) =>
-        prev.map((clip) => (clip.id === updated.id ? updated : clip))
-      );
+      queryClient.setQueryData(["suggestions", sermonId], (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          clips: prev.clips.map((clip) =>
+            clip.id === updated.id ? updated : clip
+          )
+        };
+      });
     } catch (err) {
       setError(isSafeError(err));
     } finally {
@@ -565,66 +392,21 @@ export default function SermonDetail({ params }) {
     setClipActionLoading(suggestion.id, true);
     try {
       await recordClipFeedback(suggestion.id, { accepted: false });
-      setSuggestions((prev) =>
-        prev.filter((clip) => String(clip.id) !== String(suggestion.id))
-      );
+      queryClient.setQueryData(["suggestions", sermonId], (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          clips: prev.clips.filter(
+            (clip) => String(clip.id) !== String(suggestion.id)
+          )
+        };
+      });
     } catch (err) {
       setError(isSafeError(err));
     } finally {
       setClipActionLoading(suggestion.id, false);
     }
   };
-
-  const requestEmbeddings = async () => {
-    if (embeddingLoading || sermon?.status === "embedded") {
-      return;
-    }
-    setEmbeddingLoading(true);
-    setEmbeddingError("");
-    try {
-      await generateEmbeddings(sermonId);
-      setEmbeddingRequested(true);
-    } catch (err) {
-      setEmbeddingError(isSafeError(err));
-    } finally {
-      setEmbeddingLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults([]);
-      setSearchError("");
-      setSearchLoading(false);
-      return;
-    }
-    if (!sermon) {
-      return;
-    }
-    if (sermon.status !== "embedded") {
-      setSearchResults([]);
-      setSearchError("");
-      setSearchLoading(false);
-      if (!embeddingRequested) {
-        requestEmbeddings();
-      }
-      return;
-    }
-    setSearchLoading(true);
-    const timeout = setTimeout(async () => {
-      try {
-        const data = await searchSermon(sermonId, query, 10);
-        setSearchResults(data.results || []);
-        setSearchError("");
-      } catch (err) {
-        setSearchError(isSafeError(err));
-      } finally {
-        setSearchLoading(false);
-      }
-    }, 300);
-    return () => clearTimeout(timeout);
-  }, [searchQuery, sermonId, sermon, embeddingRequested]);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-6 py-16">
@@ -651,8 +433,8 @@ export default function SermonDetail({ params }) {
             <div className="h-4 w-40 animate-pulse rounded bg-slate-800" />
             <div className="h-3 w-56 animate-pulse rounded bg-slate-900" />
           </div>
-        ) : error ? (
-          <p className="mt-2 text-sm text-red-400">{error}</p>
+        ) : statusError ? (
+          <p className="mt-2 text-sm text-red-400">{statusError}</p>
         ) : (
           <div className="mt-2 space-y-2">
             <p className="text-lg font-medium text-slate-100">{sermon?.status}</p>
@@ -694,7 +476,7 @@ export default function SermonDetail({ params }) {
               </button>
               {embeddingRequested ? (
                 <span className="text-xs text-slate-500">
-                  Embeddings are running…
+                  Embeddings are running.
                 </span>
               ) : null}
             </div>
@@ -724,7 +506,7 @@ export default function SermonDetail({ params }) {
             </div>
           ) : searchError ? (
             <p className="text-sm text-red-400">{searchError}</p>
-          ) : searchQuery.trim().length === 0 ? (
+          ) : !hasSearchInput ? (
             <p className="text-sm text-slate-500">Type to search.</p>
           ) : searchResults.length === 0 ? (
             <p className="text-sm text-slate-500">No matches yet.</p>
@@ -774,149 +556,25 @@ export default function SermonDetail({ params }) {
         }
       />
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50">
-        <div className="border-b border-slate-800 px-6 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold text-slate-200">Suggested Clips</p>
-              <p className="text-xs text-slate-500">Auto-selected ranges.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-2 text-xs text-slate-400">
-                <input
-                  type="checkbox"
-                  checked={useLlmSuggestions}
-                  onChange={(event) => setUseLlmSuggestions(event.target.checked)}
-                  disabled={suggesting}
-                  className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-emerald-400"
-                />
-                Usar IA para sugerir clips
-              </label>
-              <button
-                type="button"
-                onClick={handleSuggest}
-                disabled={suggesting}
-                className="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-100 hover:border-slate-700 disabled:opacity-50"
-              >
-                {suggesting ? "Suggesting..." : "Generate suggestions"}
-              </button>
-              {suggesting ? (
-                <div className="flex items-center gap-2 text-xs text-slate-400">
-                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-500" />
-                  Generando sugerencias...
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-        <div className="divide-y divide-slate-900 px-6 py-4">
-          {suggestionsLoading ? (
-            <div className="space-y-3">
-              <div className="h-6 w-48 animate-pulse rounded bg-slate-900" />
-              <div className="h-6 w-40 animate-pulse rounded bg-slate-900" />
-            </div>
-          ) : suggestionsError ? (
-            <p className="text-sm text-red-400">{suggestionsError}</p>
-          ) : suggestionsPending ? (
-            <div className="flex items-center gap-2 text-sm text-slate-500">
-              <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-500" />
-              Generando sugerencias...
-            </div>
-          ) : suggestions.length === 0 ? (
-            <p className="text-sm text-slate-500">No suggestions yet.</p>
-          ) : (
-            suggestions.map((clip) => {
-              const isBusy = Boolean(actionLoading[clip.id]);
-              const trimLabel = formatTrimSuggestion(clip.llm_trim);
-              return (
-                <div key={clip.id} className="flex flex-col gap-3 py-4">
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div>
-                      <p className="text-sm text-slate-200">
-                        {formatTimestamp(clip.start_ms)} - {formatTimestamp(clip.end_ms)}
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        Score {clip.score?.toFixed(2) ?? "0.00"} -{" "}
-                        {formatClipStatus(clip.status)}
-                        {clip.use_llm ? (
-                          <span className="ml-2 inline-flex rounded-full border border-emerald-500/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
-                            IA
-                          </span>
-                        ) : null}
-                      </p>
-                      {clip.rationale ? (
-                        <p className="mt-2 text-xs text-slate-400">
-                          {clip.rationale}
-                        </p>
-                      ) : null}
-                      {trimLabel ? (
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                          <span>{trimLabel}</span>
-                          {clip.trim_applied ? (
-                            <span className="rounded-full border border-emerald-500/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
-                              Recorte aplicado
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleApplyTrim(clip)}
-                              disabled={isBusy}
-                              className="rounded-full border border-emerald-500/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
-                            >
-                              Aplicar
-                            </button>
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleRender(clip, "preview")}
-                        disabled={isBusy}
-                        className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-100 hover:border-slate-700 disabled:opacity-50"
-                      >
-                        Preview
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRender(clip, "final")}
-                        disabled={isBusy}
-                        className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-100 hover:border-slate-700 disabled:opacity-50"
-                      >
-                        Render Final
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleAccept(clip)}
-                        disabled={isBusy}
-                        className="rounded-full border border-emerald-500/50 px-3 py-1 text-xs text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
-                      >
-                        Accept
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleReject(clip)}
-                        disabled={isBusy}
-                        className="rounded-full border border-rose-500/50 px-3 py-1 text-xs text-rose-200 hover:border-rose-400 disabled:opacity-50"
-                      >
-                        Reject
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingSuggestion(clip)}
-                        className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-100 hover:border-slate-700"
-                      >
-                        Edit Range
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </section>
+      <SuggestedClipsPanel
+        useLlmSuggestions={useLlmSuggestions}
+        onToggleUseLlm={setUseLlmSuggestions}
+        onSuggest={handleSuggest}
+        suggesting={suggesting}
+        suggestionsLoading={suggestionsLoading}
+        suggestionsError={suggestionsErrorMessage}
+        suggestionsPending={suggestionsPending}
+        suggestions={suggestions}
+        actionLoading={actionLoading}
+        onApplyTrim={handleApplyTrim}
+        onRender={handleRender}
+        onAccept={handleAccept}
+        onReject={handleReject}
+        onEdit={setEditingSuggestion}
+        formatTimestamp={formatTimestamp}
+        formatClipStatus={formatClipStatus}
+        formatTrimSuggestion={formatTrimSuggestion}
+      />
 
       {editingSuggestion ? (
         <ClipBuilder

@@ -1,9 +1,10 @@
 import logging
 import os
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from src.config import settings
@@ -12,6 +13,7 @@ from src.embeddings import embed_text
 from src.models import (
     Clip,
     ClipSource,
+    ClipFeedback,
     Sermon,
     SermonStatus,
     TranscriptEmbedding,
@@ -66,14 +68,18 @@ def create_sermon(
 
 @router.get("/", response_model=list[SermonRead])
 def list_sermons(session: Session = Depends(get_session)) -> list[Sermon]:
-    result = session.execute(select(Sermon).order_by(Sermon.id.desc()))
+    result = session.execute(
+        select(Sermon)
+        .where(Sermon.deleted_at.is_(None))
+        .order_by(Sermon.id.desc())
+    )
     return list(result.scalars().all())
 
 
 @router.get("/{sermon_id}", response_model=SermonRead)
 def get_sermon(sermon_id: int, session: Session = Depends(get_session)) -> Sermon:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
     return sermon
 
@@ -83,7 +89,7 @@ def update_sermon(
     sermon_id: int, payload: SermonUpdate, session: Session = Depends(get_session)
 ) -> Sermon:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     data = payload.model_dump(exclude_unset=True)
@@ -98,9 +104,35 @@ def update_sermon(
 @router.delete("/{sermon_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_sermon(sermon_id: int, session: Session = Depends(get_session)) -> None:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
-    session.delete(sermon)
+    now = datetime.utcnow()
+    sermon.deleted_at = now
+    sermon.updated_at = now
+    session.execute(
+        update(Clip)
+        .where(Clip.sermon_id == sermon_id, Clip.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
+    )
+    session.execute(
+        update(TranscriptSegment)
+        .where(TranscriptSegment.sermon_id == sermon_id)
+        .where(TranscriptSegment.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
+    )
+    session.execute(
+        update(TranscriptEmbedding)
+        .where(TranscriptEmbedding.sermon_id == sermon_id)
+        .where(TranscriptEmbedding.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
+    )
+    clip_ids = select(Clip.id).where(Clip.sermon_id == sermon_id)
+    session.execute(
+        update(ClipFeedback)
+        .where(ClipFeedback.clip_id.in_(clip_ids))
+        .where(ClipFeedback.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
+    )
     session.commit()
 
 
@@ -109,12 +141,15 @@ def list_segments(
     sermon_id: int, session: Session = Depends(get_session)
 ) -> list[TranscriptSegment]:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     result = session.execute(
         select(TranscriptSegment)
-        .where(TranscriptSegment.sermon_id == sermon_id)
+        .where(
+            TranscriptSegment.sermon_id == sermon_id,
+            TranscriptSegment.deleted_at.is_(None),
+        )
         .order_by(TranscriptSegment.start_ms.asc())
     )
     return list(result.scalars().all())
@@ -129,7 +164,7 @@ def upload_complete(
     sermon_id: int, session: Session = Depends(get_session)
 ) -> UploadCompleteResponse:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
     if not sermon.source_url:
         raise HTTPException(status_code=400, detail="Missing source object key")
@@ -160,7 +195,7 @@ def embed_sermon(
     sermon_id: int, session: Session = Depends(get_session)
 ) -> EmbedResponse:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     try:
@@ -188,7 +223,7 @@ def suggest_clips(
     session: Session = Depends(get_session),
 ) -> SuggestClipsResponse:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     try:
@@ -217,12 +252,16 @@ def list_suggestions(
     sermon_id: int, session: Session = Depends(get_session)
 ) -> ClipSuggestionsResponse:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     result = session.execute(
         select(Clip)
-        .where(Clip.sermon_id == sermon_id, Clip.source == ClipSource.auto)
+        .where(
+            Clip.sermon_id == sermon_id,
+            Clip.source == ClipSource.auto,
+            Clip.deleted_at.is_(None),
+        )
         .order_by(Clip.score.desc().nullslast(), Clip.id.desc())
     )
     clips = list(result.scalars().all())
@@ -246,7 +285,7 @@ def search_sermon(
     session: Session = Depends(get_session),
 ) -> SearchResponse:
     sermon = session.get(Sermon, sermon_id)
-    if not sermon:
+    if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
     query = q.strip()
     if not query:
@@ -266,6 +305,8 @@ def search_sermon(
             TranscriptEmbedding.segment_id == TranscriptSegment.id,
         )
         .where(TranscriptEmbedding.sermon_id == sermon_id)
+        .where(TranscriptEmbedding.deleted_at.is_(None))
+        .where(TranscriptSegment.deleted_at.is_(None))
         .order_by(TranscriptEmbedding.embedding.l2_distance(query_vector))
         .limit(limit)
     )

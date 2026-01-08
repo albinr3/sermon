@@ -10,7 +10,7 @@ Monorepo con:
 - Docker + Docker Compose (solo infra)
 - Node 20 + pnpm (web local)
 - Python 3.11+ (api y worker locales)
-- ffmpeg (transcripcion y renders del worker)
+- ffmpeg (requerido para transcripcion y renders del worker; debe estar en PATH)
 
 ## Configuracion (.env)
 Configura el archivo `.env` en la raiz. Variables clave:
@@ -47,6 +47,8 @@ uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Worker (Celery):
+
+Nota: requiere ffmpeg instalado y accesible en PATH.
 
 ```bash
 cd apps/worker

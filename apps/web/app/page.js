@@ -1,50 +1,42 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
+import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useState } from "react";
 
-import UploadSermon from "./components/UploadSermon";
 import { listSermons } from "../lib/api";
 
 const POLL_INTERVAL_MS = 3000;
 const ACTIVE_STATUSES = new Set(["pending", "uploaded", "processing"]);
 
+const UploadSermon = dynamic(() => import("./components/UploadSermon"), {
+  loading: () => (
+    <div className="h-10 w-40 animate-pulse rounded-xl bg-slate-900" />
+  )
+});
+
 export default function Home() {
-  const [sermons, setSermons] = useState([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  const loadSermons = async () => {
-    try {
-      setLoading(true);
-      const data = await listSermons();
-      setSermons(data);
-      setError("");
-    } catch (err) {
-      setError(err.message || "Failed to load sermons");
-    } finally {
-      setLoading(false);
+  const sermonsQuery = useQuery({
+    queryKey: ["sermons"],
+    queryFn: listSermons,
+    refetchInterval: (query) => {
+      const sermons = query.state.data || [];
+      if (sermons.length === 0) {
+        return false;
+      }
+      const shouldPoll = sermons.some((sermon) => {
+        const progress = typeof sermon.progress === "number" ? sermon.progress : null;
+        return (
+          ACTIVE_STATUSES.has(sermon.status) || (progress !== null && progress < 100)
+        );
+      });
+      return shouldPoll ? POLL_INTERVAL_MS : false;
     }
-  };
+  });
 
-  useEffect(() => {
-    loadSermons();
-  }, []);
-
-  useEffect(() => {
-    if (sermons.length === 0) {
-      return undefined;
-    }
-    const shouldPoll = sermons.some((sermon) => {
-      const progress = typeof sermon.progress === "number" ? sermon.progress : null;
-      return ACTIVE_STATUSES.has(sermon.status) || (progress !== null && progress < 100);
-    });
-    if (!shouldPoll) {
-      return undefined;
-    }
-    const interval = setInterval(loadSermons, POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [sermons]);
+  const sermons = sermonsQuery.data || [];
+  const error = sermonsQuery.error?.message || "";
+  const loading = sermonsQuery.isLoading;
 
   return (
     <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-6 py-16">
@@ -63,7 +55,7 @@ export default function Home() {
             Each upload starts a transcription job.
           </p>
         </div>
-        <UploadSermon onUploaded={loadSermons} />
+        <UploadSermon />
       </section>
 
       <section className="rounded-2xl border border-slate-800 bg-slate-950/50">

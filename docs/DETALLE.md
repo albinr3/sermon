@@ -42,6 +42,11 @@ Los segmentos guardan:
 
 La UI los muestra para seleccionar rangos de clip.
 
+## Notas de base de datos
+- Soft delete: las tablas principales guardan `deleted_at` y las consultas filtran solo registros activos.
+- Auditoria: se registra `created_at`, `updated_at` y `deleted_at` en entidades clave.
+- Particionado: si `transcript_segments` crece mucho, considerar particionar por `sermon_id` o rango de fechas para mantener queries y indices livianos.
+
 ## Sugerencias de clips (worker)
 Flujo de sugerencias:
 1) La UI llama `POST /sermons/{id}/suggest?use_llm=true|false`.

@@ -1,7 +1,8 @@
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from src.celery_app import celery_app
@@ -13,6 +14,7 @@ from src.models import (
     ClipRenderType,
     ClipSource,
     ClipStatus,
+    Sermon,
     Template,
     TranscriptSegment,
 )
@@ -42,9 +44,13 @@ def create_clip(payload: ClipCreate, session: Session = Depends(get_session)) ->
     if duration < MIN_DURATION_MS or duration > MAX_DURATION_MS:
         raise HTTPException(status_code=400, detail="Clip duration out of bounds")
 
+    sermon = session.get(Sermon, payload.sermon_id)
+    if not sermon or sermon.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
     if payload.template_id:
         template = session.get(Template, payload.template_id)
-        if not template:
+        if not template or template.deleted_at is not None:
             raise HTTPException(status_code=404, detail="Template not found")
 
     clip = Clip(
@@ -65,7 +71,9 @@ def create_clip(payload: ClipCreate, session: Session = Depends(get_session)) ->
 
 @router.get("/", response_model=list[ClipRead])
 def list_clips(session: Session = Depends(get_session)) -> list[Clip]:
-    result = session.execute(select(Clip).order_by(Clip.id.desc()))
+    result = session.execute(
+        select(Clip).where(Clip.deleted_at.is_(None)).order_by(Clip.id.desc())
+    )
     clips = list(result.scalars().all())
     for clip in clips:
         if clip.output_url:
@@ -79,7 +87,7 @@ def list_clips(session: Session = Depends(get_session)) -> list[Clip]:
 @router.get("/{clip_id}", response_model=ClipRead)
 def get_clip(clip_id: int, session: Session = Depends(get_session)) -> Clip:
     clip = session.get(Clip, clip_id)
-    if not clip:
+    if not clip or clip.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
     if clip.output_url:
         try:
@@ -94,7 +102,7 @@ def update_clip(
     clip_id: int, payload: ClipUpdate, session: Session = Depends(get_session)
 ) -> Clip:
     clip = session.get(Clip, clip_id)
-    if not clip:
+    if not clip or clip.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
 
     data = payload.model_dump(exclude_unset=True)
@@ -109,9 +117,16 @@ def update_clip(
 @router.delete("/{clip_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_clip(clip_id: int, session: Session = Depends(get_session)) -> None:
     clip = session.get(Clip, clip_id)
-    if not clip:
+    if not clip or clip.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
-    session.delete(clip)
+    now = datetime.utcnow()
+    clip.deleted_at = now
+    clip.updated_at = now
+    session.execute(
+        update(ClipFeedback)
+        .where(ClipFeedback.clip_id == clip_id, ClipFeedback.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
+    )
     session.commit()
 
 
@@ -124,7 +139,7 @@ def accept_clip(
     clip_id: int, session: Session = Depends(get_session)
 ) -> ClipAcceptResponse:
     suggestion = session.get(Clip, clip_id)
-    if not suggestion:
+    if not suggestion or suggestion.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
     if suggestion.source != ClipSource.auto:
         raise HTTPException(status_code=400, detail="Clip is not a suggestion")
@@ -164,7 +179,7 @@ def record_feedback(
     session: Session = Depends(get_session),
 ) -> ClipFeedback:
     clip = session.get(Clip, clip_id)
-    if not clip:
+    if not clip or clip.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
 
     feedback = ClipFeedback(
@@ -187,7 +202,7 @@ def apply_trim_suggestion(
     clip_id: int, session: Session = Depends(get_session)
 ) -> Clip:
     clip = session.get(Clip, clip_id)
-    if not clip:
+    if not clip or clip.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
     if clip.source != ClipSource.auto:
         raise HTTPException(status_code=400, detail="Clip is not a suggestion")
@@ -261,7 +276,7 @@ def render_clip(
     session: Session = Depends(get_session),
 ) -> ClipRenderResponse:
     clip = session.get(Clip, clip_id)
-    if not clip:
+    if not clip or clip.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Clip not found")
 
     duration = clip.end_ms - clip.start_ms
