@@ -23,11 +23,11 @@ export async function apiFetch(path, options = {}) {
 }
 
 export async function listSermons() {
-  return apiFetch("/sermons");
+  return apiFetch("/sermons/");
 }
 
 export async function createSermon(filename) {
-  return apiFetch("/sermons", {
+  return apiFetch("/sermons/", {
     method: "POST",
     body: JSON.stringify({ filename })
   });
@@ -48,7 +48,7 @@ export async function getTranscriptSegments(id) {
 }
 
 export async function listClips() {
-  return apiFetch("/clips");
+  return apiFetch("/clips/");
 }
 
 export async function getClip(id) {
@@ -56,7 +56,7 @@ export async function getClip(id) {
 }
 
 export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
-  return apiFetch("/clips", {
+  return apiFetch("/clips/", {
     method: "POST",
     body: JSON.stringify({ sermon_id, start_ms, end_ms, render_type })
   });

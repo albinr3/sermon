@@ -11,12 +11,13 @@ Este documento describe como funciona la web de Sermon de punta a punta: flujo d
 - Worker: Celery en `apps/worker`
 - Infra: Postgres, Redis, MinIO (S3 compatible)
 
-Servicios principales (Docker Compose):
-- `web` expone la UI en http://localhost:3000
-- `api` expone la API en http://localhost:8000
-- `minio` expone S3 en http://localhost:9000 y consola en http://localhost:9001
-- `postgres` en 5432
-- `redis` en 6379
+Servicios principales (enfoque hibrido, Docker solo para infra):
+- Web local en http://localhost:3000
+- API local en http://localhost:8000
+- Worker local ejecutando colas de Celery
+- `minio` en Docker expone S3 en http://localhost:9000 y consola en http://localhost:9001
+- `postgres` en Docker en 5432
+- `redis` en Docker en 6379
 
 ## Flujo de subida de sermon
 1) La UI crea un sermon con `POST /sermons` enviando el nombre del archivo.
@@ -115,7 +116,8 @@ Rutas principales:
 ## Configuracion (.env)
 Variables clave:
 - `DATABASE_URL`, `REDIS_URL`
-- `S3_ENDPOINT` (endpoint interno para containers)
+- `S3_ENDPOINT` (API/worker locales)
+- `S3_INTERNAL_ENDPOINT` (solo Docker, usado por minio-init)
 - `S3_PUBLIC_ENDPOINT` (endpoint accesible desde el navegador)
 - `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
 - `NEXT_PUBLIC_API_URL`

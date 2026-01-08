@@ -7,13 +7,16 @@ Monorepo con:
 - Infra: Postgres, Redis, MinIO
 
 ## Requisitos
-- Docker + Docker Compose
-- Node 20 + pnpm (solo si corres la web fuera de Docker)
+- Docker + Docker Compose (solo infra)
+- Node 20 + pnpm (web local)
+- Python 3.11+ (api y worker locales)
+- ffmpeg (transcripcion y renders del worker)
 
 ## Configuracion (.env)
 Configura el archivo `.env` en la raiz. Variables clave:
 - `DATABASE_URL`, `REDIS_URL`
-- `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
+- `S3_ENDPOINT` (API/worker locales), `S3_INTERNAL_ENDPOINT` (solo Docker), `S3_PUBLIC_ENDPOINT`
+- `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
 - `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `NEXT_PUBLIC_API_URL`
 - `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
@@ -21,23 +24,46 @@ Configura el archivo `.env` en la raiz. Variables clave:
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`, solo UI)
 - `CELERY_*` (concurrency por queue, retries y prioridades)
 
-## Levantar todo (Docker)
+## Levantar infra (Docker)
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
-UI: http://localhost:3000
-API: http://localhost:8000
+Postgres: localhost:5432
+Redis: localhost:6379
+MinIO: http://localhost:9000
 MinIO console: http://localhost:9001
-Flower: http://localhost:5555
 
-Si corres la web fuera de Docker:
+## Levantar servicios locales (sin Docker)
+
+API (FastAPI):
+
+```bash
+cd apps/api
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Worker (Celery):
+
+```bash
+cd apps/worker
+pip install -r requirements.txt
+celery -A src.celery_app worker --loglevel=info --queues default,transcriptions,suggestions,embeddings,previews,renders -P solo
+```
+
+Web (Next.js, desde la raiz del repo):
 
 ```bash
 pnpm install
 pnpm --filter web dev
 ```
+
+UI: http://localhost:3000
+API: http://localhost:8000
+Flower: http://localhost:5555 (opcional)
 
 ## Endpoints principales
 - `GET /health`
@@ -66,8 +92,7 @@ pnpm --filter web dev
 cd apps/api
 alembic upgrade head
 ```
-
-Si usas Docker, el contenedor `api` corre `alembic upgrade head` al iniciar.
+En el enfoque hibrido, corre este comando antes de levantar la API.
 
 ## Detalle de funcionamiento
 Consulta docs/DETALLE.md para ver el flujo completo.
