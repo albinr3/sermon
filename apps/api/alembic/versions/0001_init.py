@@ -1,5 +1,6 @@
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql as psql
 
 revision = "0001_init"
 down_revision = None
@@ -8,7 +9,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    sermon_status = sa.Enum(
+    sermon_status = psql.ENUM(
         "pending",
         "uploaded",
         "processing",
@@ -19,7 +20,7 @@ def upgrade() -> None:
         name="sermon_status",
         create_type=False,
     )
-    clip_status = sa.Enum(
+    clip_status = psql.ENUM(
         "pending", "processing", "done", "error", name="clip_status", create_type=False
     )
     bind = op.get_bind()

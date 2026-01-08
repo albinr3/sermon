@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.db import SessionLocal, create_db_and_tables
+from src.db import SessionLocal
 from src.models import Template
 from src.routers import clips, sermons
 from src.storage import ensure_bucket_exists
@@ -21,7 +21,6 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    create_db_and_tables()
     ensure_bucket_exists()
     seed_templates()
 

@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_model: str | None = None
     deepseek_base_url: str | None = None
+    celery_max_retries: int = 5
+    celery_retry_backoff_base: int = 5
+    celery_retry_backoff_max: int = 300
+    celery_retry_jitter: int = 3
+    celery_default_priority: int = 5
 
 
 settings = Settings()

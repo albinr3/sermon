@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.celery_app import celery_app
+from src.config import settings
 from src.db import get_session
 from src.models import (
     Clip,
@@ -272,8 +273,18 @@ def render_clip(
     session.commit()
 
     queue = "previews" if type == ClipRenderType.preview else "renders"
+    priority = (
+        settings.celery_priority_render_preview
+        if type == ClipRenderType.preview
+        else settings.celery_priority_render_final
+    )
     try:
-        celery_app.send_task("worker.render_clip", args=[clip.id], queue=queue)
+        celery_app.send_task(
+            "worker.render_clip",
+            args=[clip.id],
+            queue=queue,
+            priority=priority,
+        )
     except Exception as exc:
         clip.status = ClipStatus.error
         session.commit()

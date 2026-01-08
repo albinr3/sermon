@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_model: str | None = None
     deepseek_base_url: str | None = None
+    celery_default_priority: int = 5
+    celery_priority_transcribe: int = 7
+    celery_priority_suggest: int = 5
+    celery_priority_embed: int = 3
+    celery_priority_render_preview: int = 8
+    celery_priority_render_final: int = 4
 
 
 settings = Settings()

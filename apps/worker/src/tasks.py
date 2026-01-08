@@ -1,4 +1,5 @@
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -6,10 +7,12 @@ import unicodedata
 from uuid import uuid4
 
 from celery.utils.log import get_task_logger
+from botocore.exceptions import BotoCoreError, ClientError
 from faster_whisper import WhisperModel
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 
 from src.ass import build_ass_from_segments
 from src.celery_app import celery_app
@@ -117,8 +120,45 @@ FINAL_SETTINGS = {
     "maxrate": "4000k",
     "bufsize": "8000k",
 }
+RETRYABLE_EXCEPTIONS = (
+    BotoCoreError,
+    ClientError,
+    ConnectionError,
+    OSError,
+    OperationalError,
+    subprocess.CalledProcessError,
+    TimeoutError,
+)
 
 _embedding_model = None
+
+
+def _calculate_retry_delay(retries: int) -> int:
+    base = max(1, settings.celery_retry_backoff_base)
+    max_delay = max(base, settings.celery_retry_backoff_max)
+    delay = min(max_delay, base * (2**retries))
+    jitter = max(0, settings.celery_retry_jitter)
+    if jitter:
+        delay += random.uniform(0, jitter)
+    return int(delay)
+
+
+def _maybe_retry(task, exc: Exception, *, label: str) -> None:
+    if not isinstance(exc, RETRYABLE_EXCEPTIONS):
+        return
+    max_retries = task.max_retries
+    retries = task.request.retries
+    if max_retries is not None and retries >= max_retries:
+        return
+    delay = _calculate_retry_delay(retries)
+    logger.warning(
+        "%s failed; retrying in %ss (attempt %s/%s)",
+        label,
+        delay,
+        retries + 1,
+        max_retries,
+    )
+    raise task.retry(exc=exc, countdown=delay)
 
 
 def _get_embedding_model() -> SentenceTransformer:
@@ -629,8 +669,12 @@ def _resolve_template_config(session, clip: Clip) -> dict:
     return DEFAULT_TEMPLATE_CONFIG
 
 
-@celery_app.task(name="worker.transcribe_sermon")
-def transcribe_sermon(sermon_id: int) -> dict:
+@celery_app.task(
+    name="worker.transcribe_sermon",
+    bind=True,
+    max_retries=settings.celery_max_retries,
+)
+def transcribe_sermon(self, sermon_id: int) -> dict:
     session = SessionLocal()
     sermon = None
     try:
@@ -668,19 +712,21 @@ def transcribe_sermon(sermon_id: int) -> dict:
                 text=True,
             )
 
-            model = WhisperModel("small", device="cpu", compute_type="int8")
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
             segments, info = model.transcribe(wav_path)
             total_duration = getattr(info, "duration", None)
             if total_duration is None and isinstance(info, dict):
                 total_duration = info.get("duration")
 
             count = 0
+            batch = []
+            batch_size = 100
             last_progress = sermon.progress or 0
             for segment in segments:
                 text = segment.text.strip()
                 if not text:
                     continue
-                session.add(
+                batch.append(
                     TranscriptSegment(
                         sermon_id=sermon.id,
                         start_ms=int(segment.start * 1000),
@@ -689,12 +735,20 @@ def transcribe_sermon(sermon_id: int) -> dict:
                     )
                 )
                 count += 1
+                if len(batch) >= batch_size:
+                    session.bulk_save_objects(batch)
+                    session.commit()
+                    batch = []
                 if total_duration:
                     progress = int(min(95, max(5, (segment.end / total_duration) * 90 + 5)))
                     if progress - last_progress >= 2:
                         sermon.progress = progress
                         session.commit()
                         last_progress = progress
+
+            if batch:
+                session.bulk_save_objects(batch)
+                session.commit()
 
             session.commit()
 
@@ -705,6 +759,7 @@ def transcribe_sermon(sermon_id: int) -> dict:
         return {"sermon_id": sermon.id, "segments": count}
     except Exception as exc:
         session.rollback()
+        _maybe_retry(self, exc, label=f"Transcribe sermon {sermon_id}")
         if sermon is not None:
             sermon.status = SermonStatus.error
             sermon.error_message = str(exc)[:1000]
@@ -715,8 +770,12 @@ def transcribe_sermon(sermon_id: int) -> dict:
         session.close()
 
 
-@celery_app.task(name="worker.suggest_clips")
-def suggest_clips(sermon_id: int, use_llm: bool | None = None) -> dict:
+@celery_app.task(
+    name="worker.suggest_clips",
+    bind=True,
+    max_retries=settings.celery_max_retries,
+)
+def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
     session = SessionLocal()
     sermon = None
     try:
@@ -873,6 +932,7 @@ def suggest_clips(sermon_id: int, use_llm: bool | None = None) -> dict:
         return {"sermon_id": sermon_id, "suggestions": created}
     except Exception as exc:
         session.rollback()
+        _maybe_retry(self, exc, label=f"Suggest clips for sermon {sermon_id}")
         if sermon is not None:
             sermon.status = SermonStatus.error
             sermon.error_message = str(exc)[:1000]
@@ -883,8 +943,12 @@ def suggest_clips(sermon_id: int, use_llm: bool | None = None) -> dict:
         session.close()
 
 
-@celery_app.task(name="worker.generate_embeddings")
-def generate_embeddings(sermon_id: int) -> dict:
+@celery_app.task(
+    name="worker.generate_embeddings",
+    bind=True,
+    max_retries=settings.celery_max_retries,
+)
+def generate_embeddings(self, sermon_id: int) -> dict:
     session = SessionLocal()
     sermon = None
     try:
@@ -945,6 +1009,7 @@ def generate_embeddings(sermon_id: int) -> dict:
         return {"sermon_id": sermon_id, "segments": total}
     except Exception as exc:
         session.rollback()
+        _maybe_retry(self, exc, label=f"Generate embeddings for sermon {sermon_id}")
         if sermon is not None:
             sermon.status = SermonStatus.error
             sermon.error_message = str(exc)[:1000]
@@ -955,8 +1020,12 @@ def generate_embeddings(sermon_id: int) -> dict:
         session.close()
 
 
-@celery_app.task(name="worker.render_clip")
-def render_clip(clip_id: int) -> dict:
+@celery_app.task(
+    name="worker.render_clip",
+    bind=True,
+    max_retries=settings.celery_max_retries,
+)
+def render_clip(self, clip_id: int) -> dict:
     session = SessionLocal()
     clip = None
     try:
@@ -1270,6 +1339,7 @@ def render_clip(clip_id: int) -> dict:
         return {"clip_id": clip.id, "output_key": object_key}
     except Exception as exc:
         session.rollback()
+        _maybe_retry(self, exc, label=f"Render clip {clip_id}")
         if clip is not None:
             clip.status = ClipStatus.error
             session.commit()

@@ -49,7 +49,7 @@ services:
     ports:
       - "8000:8000"
     command: >
-      uvicorn src.main:app --host 0.0.0.0 --port 8000
+      /bin/sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
 
   worker:
     build:
@@ -61,7 +61,43 @@ services:
       - redis
       - minio
     command: >
-      celery -A src.celery_app worker --loglevel=info
+      celery -A src.celery_app worker --loglevel=info --queues default --concurrency=${CELERY_DEFAULT_CONCURRENCY:-2}
+
+  worker-transcriptions:
+    build:
+      context: ./apps/worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    command: >
+      celery -A src.celery_app worker --loglevel=info --queues transcriptions --concurrency=${CELERY_TRANSCRIBE_CONCURRENCY:-1}
+
+  worker-suggestions:
+    build:
+      context: ./apps/worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    command: >
+      celery -A src.celery_app worker --loglevel=info --queues suggestions --concurrency=${CELERY_SUGGEST_CONCURRENCY:-2}
+
+  worker-embeddings:
+    build:
+      context: ./apps/worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    command: >
+      celery -A src.celery_app worker --loglevel=info --queues embeddings --concurrency=${CELERY_EMBED_CONCURRENCY:-1}
 
   worker-previews:
     build:
@@ -73,7 +109,7 @@ services:
       - redis
       - minio
     command: >
-      celery -A src.celery_app worker --loglevel=info --queues previews --concurrency=1
+      celery -A src.celery_app worker --loglevel=info --queues previews --concurrency=${CELERY_PREVIEW_CONCURRENCY:-1}
 
   worker-renders:
     build:
@@ -85,7 +121,19 @@ services:
       - redis
       - minio
     command: >
-      celery -A src.celery_app worker --loglevel=info --queues renders
+      celery -A src.celery_app worker --loglevel=info --queues renders --concurrency=${CELERY_RENDER_CONCURRENCY:-1}
+
+  flower:
+    build:
+      context: ./apps/worker
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    ports:
+      - "5555:5555"
+    command: >
+      celery -A src.celery_app flower --port=5555
 
   web:
     build:

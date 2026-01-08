@@ -19,6 +19,7 @@ Configura el archivo `.env` en la raiz. Variables clave:
 - `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`, solo UI)
+- `CELERY_*` (concurrency por queue, retries y prioridades)
 
 ## Levantar todo (Docker)
 
@@ -29,6 +30,7 @@ docker compose up --build
 UI: http://localhost:3000
 API: http://localhost:8000
 MinIO console: http://localhost:9001
+Flower: http://localhost:5555
 
 Si corres la web fuera de Docker:
 
@@ -64,6 +66,8 @@ pnpm --filter web dev
 cd apps/api
 alembic upgrade head
 ```
+
+Si usas Docker, el contenedor `api` corre `alembic upgrade head` al iniciar.
 
 ## Detalle de funcionamiento
 Consulta docs/DETALLE.md para ver el flujo completo.

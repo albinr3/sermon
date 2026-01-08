@@ -3,7 +3,7 @@ import os
 import sys
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, inspect, pool, text
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if BASE_DIR not in sys.path:
@@ -18,6 +18,33 @@ fileConfig(config.config_file_name)
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
+
+
+def ensure_alembic_version_table(connection) -> None:
+    inspector = inspect(connection)
+    if "alembic_version" not in inspector.get_table_names():
+        connection.execute(
+            text("CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL)")
+        )
+        return
+
+    max_length = connection.execute(
+        text(
+            """
+            SELECT character_maximum_length
+            FROM information_schema.columns
+            WHERE table_name = 'alembic_version'
+              AND column_name = 'version_num'
+            """
+        )
+    ).scalar()
+    if max_length is not None and max_length < 255:
+        connection.execute(
+            text(
+                "ALTER TABLE alembic_version "
+                "ALTER COLUMN version_num TYPE VARCHAR(255)"
+            )
+        )
 
 
 def run_migrations_offline() -> None:
@@ -41,6 +68,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        ensure_alembic_version_table(connection)
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():

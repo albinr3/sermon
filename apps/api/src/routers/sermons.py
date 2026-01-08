@@ -140,7 +140,11 @@ def upload_complete(
     session.refresh(sermon)
 
     try:
-        celery_app.send_task("worker.transcribe_sermon", args=[sermon.id])
+        celery_app.send_task(
+            "worker.transcribe_sermon",
+            args=[sermon.id],
+            priority=settings.celery_priority_transcribe,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to enqueue transcribe") from exc
 
@@ -160,7 +164,11 @@ def embed_sermon(
         raise HTTPException(status_code=404, detail="Sermon not found")
 
     try:
-        celery_app.send_task("worker.generate_embeddings", args=[sermon.id])
+        celery_app.send_task(
+            "worker.generate_embeddings",
+            args=[sermon.id],
+            priority=settings.celery_priority_embed,
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail="Failed to enqueue embeddings"
@@ -191,6 +199,7 @@ def suggest_clips(
             "worker.suggest_clips",
             args=[sermon.id],
             kwargs={"use_llm": use_llm_effective},
+            priority=settings.celery_priority_suggest,
         )
     except Exception as exc:
         raise HTTPException(
