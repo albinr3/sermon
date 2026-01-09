@@ -185,18 +185,20 @@ export default function ClipBuilder({
   };
 
   return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-950/50">
-      <div className="border-b border-slate-800 px-6 py-4">
+    <section className="surface-card">
+      <div className="border-b border-[color:var(--line)] px-6 py-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-slate-200">{title}</p>
-            {subtitle ? <p className="text-xs text-slate-500">{subtitle}</p> : null}
+            <p className="text-sm font-semibold">{title}</p>
+            {subtitle ? (
+              <p className="text-xs text-[color:var(--muted)]">{subtitle}</p>
+            ) : null}
           </div>
           {onCancel ? (
             <button
               type="button"
               onClick={onCancel}
-              className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-300 hover:border-slate-700"
+              className="btn btn-outline px-3 py-1 text-xs"
             >
               Cancel
             </button>
@@ -205,10 +207,10 @@ export default function ClipBuilder({
       </div>
       <div className="space-y-3 px-6 py-4">
         {segments.length === 0 ? (
-          <p className="text-sm text-slate-500">No segments available.</p>
+          <p className="text-sm text-[color:var(--muted)]">No segments available.</p>
         ) : (
           <>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-400">
+            <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-2 text-xs text-[color:var(--muted)]">
               {selectionHint}
             </div>
             <div className="space-y-3">
@@ -220,12 +222,12 @@ export default function ClipBuilder({
                 const isStart = selection.startIndex === index;
                 const isEnd = selection.endIndex === index;
                 const selectionClass = isStart
-                  ? "border-emerald-400/80 bg-emerald-500/10"
+                  ? "border-[color:var(--accent)] bg-[color:var(--accent-soft)]"
                   : isEnd
-                  ? "border-amber-400/80 bg-amber-500/10"
+                  ? "border-[color:var(--accent-2)] bg-[color:var(--accent-2-soft)]"
                   : isSelected
-                  ? "border-emerald-500/50 bg-emerald-500/5"
-                  : "border-slate-800 hover:border-slate-700";
+                  ? "border-[color:var(--accent)] bg-[color:var(--accent-soft)]"
+                  : "border-[color:var(--line)] hover:border-[color:var(--accent)]";
 
                 return (
                   <button
@@ -235,28 +237,30 @@ export default function ClipBuilder({
                     className={`w-full rounded-lg border p-3 text-left transition ${selectionClass}`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                        <span className="rounded-full border border-slate-800 px-2 py-0.5">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-[color:var(--muted)]">
+                        <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5">
                           Start {formatTimestamp(segment.start_ms)}
                         </span>
-                        <span className="rounded-full border border-slate-800 px-2 py-0.5">
+                        <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5">
                           End {formatTimestamp(segment.end_ms)}
                         </span>
                       </div>
                       <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide">
                         {isStart ? (
-                          <span className="rounded-full border border-emerald-500/60 px-2 py-0.5 text-emerald-200">
+                          <span className="rounded-full border border-[color:var(--accent)] px-2 py-0.5 text-[#7a3826]">
                             Start
                           </span>
                         ) : null}
                         {isEnd ? (
-                          <span className="rounded-full border border-amber-500/60 px-2 py-0.5 text-amber-200">
+                          <span className="rounded-full border border-[color:var(--accent-2)] px-2 py-0.5 text-[color:var(--accent-2-strong)]">
                             End
                           </span>
                         ) : null}
                       </div>
                     </div>
-                    <p className="mt-2 text-sm text-slate-200">{segment.text}</p>
+                    <p className="mt-2 text-sm text-[color:var(--ink)]">
+                      {segment.text}
+                    </p>
                   </button>
                 );
               })}
@@ -264,18 +268,18 @@ export default function ClipBuilder({
           </>
         )}
       </div>
-      <div className="border-t border-slate-800 px-6 py-4">
+      <div className="border-t border-[color:var(--line)] px-6 py-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="text-sm text-slate-400">
+          <div className="text-sm text-[color:var(--muted)]">
             {selectionReady ? (
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-slate-800 px-2 py-0.5 text-xs text-slate-400">
+                <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5 text-xs text-[color:var(--muted)]">
                   Start {formatTimestamp(selectionStartMs)}
                 </span>
-                <span className="rounded-full border border-slate-800 px-2 py-0.5 text-xs text-slate-400">
+                <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5 text-xs text-[color:var(--muted)]">
                   End {formatTimestamp(selectionEndMs)}
                 </span>
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-[color:var(--muted)]">
                   {Math.round(selectionDurationMs / 1000)}s total
                 </span>
               </div>
@@ -287,20 +291,20 @@ export default function ClipBuilder({
             type="button"
             onClick={handleSubmit}
             disabled={isSubmitting}
-            className="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-100 hover:border-slate-700 disabled:opacity-50"
+            className="btn btn-primary disabled:opacity-50"
           >
             {isSubmitting ? busyLabel : actionLabel}
           </button>
         </div>
         {mediaUrl ? (
-          <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+          <div className="mt-4 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-slate-400">Audio preview</p>
+              <p className="text-xs text-[color:var(--muted)]">Audio preview</p>
               {previewReady ? (
                 <button
                   type="button"
                   onClick={handlePreview}
-                  className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:border-slate-500"
+                  className="btn btn-outline px-3 py-1 text-xs"
                 >
                   Play selection
                 </button>
@@ -319,17 +323,19 @@ export default function ClipBuilder({
                 />
               </div>
             ) : (
-              <p className="mt-2 text-xs text-slate-500">
+              <p className="mt-2 text-xs text-[color:var(--muted)]">
                 Select a range to enable the audio preview.
               </p>
             )}
           </div>
         ) : (
-          <p className="mt-4 text-xs text-slate-500">
+          <p className="mt-4 text-xs text-[color:var(--muted)]">
             Audio preview will appear once the source video is available.
           </p>
         )}
-        {clipError ? <p className="mt-2 text-sm text-red-400">{clipError}</p> : null}
+        {clipError ? (
+          <p className="mt-2 text-sm text-[#a33a2b]">{clipError}</p>
+        ) : null}
       </div>
     </section>
   );

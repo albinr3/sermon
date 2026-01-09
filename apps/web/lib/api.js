@@ -52,8 +52,25 @@ export async function apiFetch(path, options = {}, schema) {
   }
 }
 
-export async function listSermons() {
-  return apiFetch("/sermons/", {}, sermonListSchema);
+export async function listSermons({ limit, offset, q, status, tag } = {}) {
+  const params = new URLSearchParams();
+  if (typeof limit === "number") {
+    params.set("limit", String(limit));
+  }
+  if (typeof offset === "number") {
+    params.set("offset", String(offset));
+  }
+  if (q) {
+    params.set("q", q);
+  }
+  if (status) {
+    params.set("status", status);
+  }
+  if (tag) {
+    params.set("tag", tag);
+  }
+  const query = params.toString();
+  return apiFetch(`/sermons/${query ? `?${query}` : ""}`, {}, sermonListSchema);
 }
 
 export async function createSermon(filename) {
@@ -73,8 +90,37 @@ export async function getSermon(id) {
   return apiFetch(`/sermons/${id}`, {}, sermonSchema);
 }
 
-export async function getTranscriptSegments(id) {
-  return apiFetch(`/sermons/${id}/segments`, {}, transcriptSegmentListSchema);
+export async function updateSermon(id, payload) {
+  return apiFetch(`/sermons/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  }, sermonSchema);
+}
+
+export async function deleteSermon(id) {
+  return apiFetch(`/sermons/${id}`, {
+    method: "DELETE"
+  });
+}
+
+export async function getTranscriptSegments(id, { limit, offset } = {}) {
+  const params = new URLSearchParams();
+  if (typeof limit === "number") {
+    params.set("limit", String(limit));
+  }
+  if (typeof offset === "number") {
+    params.set("offset", String(offset));
+  }
+  const query = params.toString();
+  return apiFetch(
+    `/sermons/${id}/segments${query ? `?${query}` : ""}`,
+    {},
+    transcriptSegmentListSchema
+  );
+}
+
+export async function getTranscriptStats(id) {
+  return apiFetch(`/sermons/${id}/transcript-stats`);
 }
 
 export async function listClips() {
@@ -92,10 +138,13 @@ export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   }, clipSchema);
 }
 
-export async function suggestClips(id, useLlm) {
+export async function suggestClips(id, useLlm, llmMethod = "scoring") {
   const params = new URLSearchParams();
   if (typeof useLlm === "boolean") {
     params.set("use_llm", String(useLlm));
+  }
+  if (llmMethod) {
+    params.set("llm_method", llmMethod);
   }
   const query = params.toString();
   return apiFetch(`/sermons/${id}/suggest${query ? `?${query}` : ""}`, {
@@ -111,6 +160,16 @@ export async function generateEmbeddings(id) {
 
 export async function listSuggestions(id) {
   return apiFetch(`/sermons/${id}/suggestions`, {}, clipSuggestionsResponseSchema);
+}
+
+export async function deleteSuggestions(id) {
+  return apiFetch(`/sermons/${id}/suggestions`, {
+    method: "DELETE"
+  });
+}
+
+export async function getTokenStats(id) {
+  return apiFetch(`/sermons/${id}/token-stats`);
 }
 
 export async function acceptSuggestion(clipId) {

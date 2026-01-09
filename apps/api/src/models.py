@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import List
 
 from sqlalchemy import (
+    Date,
     DateTime,
     Enum as SqlEnum,
     Float,
@@ -68,6 +69,11 @@ class Sermon(Base):
         SqlEnum(SermonStatus, name="sermon_status"), default=SermonStatus.pending
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preacher: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    series: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sermon_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
@@ -164,6 +170,14 @@ class Clip(Base):
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     use_llm: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    llm_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_estimated_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    llm_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_cache_hit_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_cache_miss_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
     llm_trim: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     llm_trim_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     trim_applied: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -19,6 +19,8 @@ Configura el archivo `.env` en la raiz. Variables clave:
 - `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
 - `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `NEXT_PUBLIC_API_URL`
+- `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB` (default `2048`)
+- `NEXT_PUBLIC_POLL_INTERVAL_MS` (default `5000`)
 - `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`, solo UI)
@@ -82,12 +84,25 @@ Flower: http://localhost:5555 (opcional)
 - `POST /clips`
 - `GET /clips`
 - `GET /clips/{id}`
+- `POST /clips/{id}/accept`
+- `POST /clips/{id}/feedback`
+- `POST /clips/{id}/apply-trim`
 - `POST /clips/{id}/render?type=preview|final`
+
+## Notas
+- Las URLs firmadas (presigned PUT/GET) de MinIO expiran a los 3600s (1h).
+- La UI valida el tamano maximo de archivo con `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB`.
 
 ## LLM para sugerencias (Deepseek)
 - El worker reordena candidatos con Deepseek cuando `use_llm` es true.
 - Si falta config o hay error, cae a heuristica sin romper el flujo.
+- Puede devolver `trim_suggestion` (recorte sugerido) que se guarda en el clip.
 - Las sugerencias guardan `use_llm` para mostrar un badge IA en la UI.
+
+## Actualizaciones recientes
+- Sugerencias con dedupe por solapamiento y por semantica (si hay embeddings).
+- Previews iniciales de sugerencias se encolan automaticamente y luego se completan en background.
+- Acciones nuevas sobre sugerencias: aceptar, enviar feedback y aplicar trim sugerido.
 
 ## Alembic
 

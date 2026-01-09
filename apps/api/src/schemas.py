@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from src.models import (
     ClipReframeMode,
@@ -22,13 +22,34 @@ class ORMModel(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, from_attributes=True)
 
 
-class SermonCreate(StrictBaseModel):
+class SermonPayload(StrictBaseModel):
     title: Optional[str] = None
+    description: Optional[str] = None
+    preacher: Optional[str] = None
+    series: Optional[str] = None
+    sermon_date: Optional[date] = None
+    tags: Optional[list[str]] = None
+
+    @field_validator("sermon_date", mode="before")
+    @classmethod
+    def parse_sermon_date(cls, value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("Invalid date format; expected YYYY-MM-DD") from exc
+        return value
+
+
+class SermonCreate(SermonPayload):
     filename: Optional[str] = None
 
 
-class SermonUpdate(StrictBaseModel):
-    title: Optional[str] = None
+class SermonUpdate(SermonPayload):
     source_url: Optional[str] = None
     status: Optional[SermonStatus] = None
 
@@ -56,6 +77,11 @@ class EmbedResponse(StrictBaseModel):
 class SermonRead(ORMModel):
     id: int
     title: Optional[str]
+    description: Optional[str] = None
+    preacher: Optional[str] = None
+    series: Optional[str] = None
+    sermon_date: Optional[date] = None
+    tags: Optional[list[str]] = None
     source_url: Optional[str]
     source_download_url: Optional[str] = None
     progress: int
@@ -106,6 +132,14 @@ class ClipRead(ORMModel):
     score: Optional[float]
     rationale: Optional[str]
     use_llm: bool = False
+    llm_prompt_tokens: Optional[int] = None
+    llm_completion_tokens: Optional[int] = None
+    llm_total_tokens: Optional[int] = None
+    llm_estimated_cost: Optional[float] = None
+    llm_output_tokens: Optional[int] = None
+    llm_cache_hit_tokens: Optional[int] = None
+    llm_cache_miss_tokens: Optional[int] = None
+    llm_method: Optional[str] = None
     llm_trim: Optional[dict] = None
     llm_trim_confidence: Optional[float] = None
     trim_applied: bool = False

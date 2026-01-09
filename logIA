@@ -1,0 +1,50 @@
+===================================
+2026-01-09T20:22:28 SERMON 17 - TOKEN USAGE REPORT
+Method: full-context
+Prompt tokens: 3682
+Output tokens: 627
+Total tokens: 4309
+Cache hit tokens: 64
+Cache miss tokens: 3618
+Cost: $0.000691
+===================================
+===================================
+2026-01-09T20:22:28 SERMON 17 - TOKEN USAGE REPORT
+Method: selection
+Prompt tokens: 25086
+Output tokens: 436
+Total tokens: 25522
+Cache hit tokens: 128
+Cache miss tokens: 24958
+Cost: $0.003634
+===================================
+-----------------------------------
+2026-01-09T20:22:28 CLIP 216 TOKENS
+Sermon: 17
+Method: full-context
+Prompt tokens: 1841
+Output tokens: 314
+Total tokens: 2154
+Cache hit tokens: 32
+Cache miss tokens: 1809
+-----------------------------------
+-----------------------------------
+2026-01-09T20:22:28 CLIP 217 TOKENS
+Sermon: 17
+Method: full-context
+Prompt tokens: 1841
+Output tokens: 314
+Total tokens: 2154
+Cache hit tokens: 32
+Cache miss tokens: 1809
+-----------------------------------
+-----------------------------------
+2026-01-09T20:22:28 CLIP 218 TOKENS
+Sermon: 17
+Method: selection
+Prompt tokens: 25086
+Output tokens: 436
+Total tokens: 25522
+Cache hit tokens: 128
+Cache miss tokens: 24958
+-----------------------------------

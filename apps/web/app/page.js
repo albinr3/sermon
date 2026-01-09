@@ -33,101 +33,95 @@ const STEPS = [
 export default function LandingPage() {
   return (
     <main className="relative overflow-hidden">
-      <div className="pointer-events-none absolute left-1/2 top-[-120px] h-80 w-80 -translate-x-1/2 rounded-full bg-emerald-500/10 blur-3xl" />
-      <div className="pointer-events-none absolute right-0 top-32 h-64 w-64 rounded-full bg-slate-800/40 blur-3xl" />
+      <div className="pointer-events-none absolute left-[-120px] top-[-80px] h-56 w-56 rounded-full bg-[color:var(--accent-soft)] blur-3xl" />
+      <div className="pointer-events-none absolute right-[-80px] top-40 h-64 w-64 rounded-full bg-[color:var(--accent-2-soft)] blur-3xl" />
+      <div className="pointer-events-none absolute bottom-[-120px] left-1/2 h-72 w-72 -translate-x-1/2 rounded-full bg-[#f6d7a8] blur-[140px]" />
 
-      <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-16 px-6 py-12">
-        <header className="flex flex-wrap items-center justify-between gap-4">
+      <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-14 px-6 py-14">
+        <header className="flex flex-wrap items-center justify-between gap-6">
           <div className="flex items-center gap-3">
-            <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-slate-800 bg-slate-900 text-lg font-semibold text-emerald-300">
-              S
+            <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-[color:var(--accent-soft)] text-lg font-semibold text-[color:var(--accent-strong)]">
+              SC
             </span>
             <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-slate-500">
+              <p className="text-xs uppercase tracking-[0.4em] text-[color:var(--muted)]">
                 SermonClip Studio
               </p>
-              <p className="text-sm font-semibold text-slate-200">Clip workflow</p>
+              <p className="text-sm font-semibold text-[color:var(--ink)]">
+                Editorial clip workspace
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <Link
-              href="/app"
-              className="rounded-full border border-emerald-500/60 px-4 py-2 text-sm text-emerald-200 transition hover:border-emerald-400 hover:text-emerald-100"
-            >
+            <Link href="/app" className="btn btn-outline">
               Open app
+            </Link>
+            <Link href="/#workflow" className="btn btn-soft">
+              See workflow
             </Link>
           </div>
         </header>
 
-        <section className="grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+        <section className="grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
           <div className="space-y-6">
-            <p className="text-sm uppercase tracking-[0.35em] text-slate-500">
-              Sermon clips
-            </p>
-            <h1 className="text-4xl font-semibold leading-tight text-slate-100 md:text-5xl">
-              Turn sermons into shareable moments without the chaos.
+            <span className="pill">Sermon clips</span>
+            <h1 className="text-4xl leading-tight md:text-5xl">
+              Shape sermons into{" "}
+              <span className="text-[color:var(--accent-strong)]">
+                shareable stories
+              </span>{" "}
+              with calm precision.
             </h1>
-            <p className="max-w-xl text-base text-slate-400">
-              Organize uploads, track transcription progress, and ship clips from
-              one calm workspace. Built for fast iteration and clean handoffs.
+            <p className="max-w-xl text-base text-[color:var(--muted)]">
+              A single space for uploads, transcription status, and clip delivery.
+              Designed for focused teams and consistent branding.
             </p>
             <div className="flex flex-wrap items-center gap-4">
-              <Link
-                href="/app"
-                className="rounded-full bg-emerald-500 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-emerald-400"
-              >
+              <Link href="/app" className="btn btn-primary">
                 Launch dashboard
               </Link>
-              <Link
-                href="/#workflow"
-                className="rounded-full border border-slate-800 px-6 py-3 text-sm text-slate-200"
-              >
-                Watch workflow
+              <Link href="/app" className="btn btn-outline">
+                View recent uploads
               </Link>
             </div>
           </div>
 
-          <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-6">
+          <div className="surface-card p-6">
             <div className="space-y-4">
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                  Live status
-                </p>
-                <p className="mt-2 text-lg font-semibold text-slate-100">
+              <div className="surface-card-soft p-4">
+                <p className="pill">Live status</p>
+                <p className="mt-3 text-xl font-semibold text-[color:var(--ink)]">
                   Processing 68%
                 </p>
-                <div className="mt-3 h-2 w-full rounded-full bg-slate-900">
-                  <div className="h-2 w-[68%] rounded-full bg-emerald-500/70" />
+                <div className="mt-4 h-2 w-full rounded-full bg-[color:var(--bg-elevated)]">
+                  <div className="h-2 w-[68%] rounded-full bg-[color:var(--accent)]" />
                 </div>
               </div>
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
-                <p className="text-sm font-semibold text-slate-200">
-                  Suggested clips
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  6 candidates ready for review
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <span className="rounded-full border border-emerald-500/40 px-3 py-1 text-xs text-emerald-200">
+              <div className="surface-card-soft p-4">
+                <div className="flex items-center justify-between text-sm font-semibold">
+                  <span>Suggested clips</span>
+                  <span className="text-xs text-[color:var(--muted)]">6 ready</span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-[color:var(--accent)] px-3 py-1 text-xs text-[color:var(--accent-strong)]">
                     00:42 - 01:10
                   </span>
-                  <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400">
+                  <span className="rounded-full border border-[color:var(--line)] px-3 py-1 text-xs text-[color:var(--muted)]">
                     03:18 - 03:56
                   </span>
-                  <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-400">
+                  <span className="rounded-full border border-[color:var(--line)] px-3 py-1 text-xs text-[color:var(--muted)]">
                     05:04 - 05:44
                   </span>
                 </div>
               </div>
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
-                <p className="text-sm font-semibold text-slate-200">Clip render</p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Preview ready to download
-                </p>
-                <button
-                  type="button"
-                  className="mt-4 w-full rounded-full border border-slate-700 px-4 py-2 text-xs text-slate-300"
-                >
+              <div className="surface-card-soft p-4">
+                <div className="flex items-center justify-between text-sm font-semibold">
+                  <span>Clip render</span>
+                  <span className="text-xs text-[color:var(--muted)]">
+                    Preview ready
+                  </span>
+                </div>
+                <button type="button" className="btn btn-outline mt-4 w-full">
                   Download preview
                 </button>
               </div>
@@ -135,77 +129,59 @@ export default function LandingPage() {
           </div>
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-3">
+        <section className="grid gap-6 lg:grid-cols-3">
           {FEATURES.map((feature) => (
-            <div
-              key={feature.title}
-              className="rounded-2xl border border-slate-800 bg-slate-950/60 p-6"
-            >
-              <p className="text-lg font-semibold text-slate-100">
-                {feature.title}
+            <div key={feature.title} className="surface-card p-6">
+              <p className="text-lg font-semibold">{feature.title}</p>
+              <p className="mt-2 text-sm text-[color:var(--muted)]">
+                {feature.description}
               </p>
-              <p className="mt-2 text-sm text-slate-400">{feature.description}</p>
             </div>
           ))}
         </section>
 
         <section
           id="workflow"
-          className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr] lg:items-center"
+          className="grid gap-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-center"
         >
           <div className="space-y-4">
-            <p className="text-sm uppercase tracking-[0.3em] text-slate-500">
-              Workflow
-            </p>
-            <h2 className="text-3xl font-semibold text-slate-100">
+            <span className="pill">Workflow</span>
+            <h2 className="text-3xl">
               Keep the team focused on the message.
             </h2>
-            <p className="text-sm text-slate-400">
-              From first upload to final render, every step stays visible. That
-              means fewer handoff errors and more time to refine the story.
+            <p className="text-sm text-[color:var(--muted)]">
+              From first upload to final render, every milestone stays visible.
+              Fewer handoff errors, more time to refine the story.
             </p>
-            <Link
-              href="/app"
-              className="inline-flex items-center gap-2 text-sm text-emerald-300 hover:text-emerald-200"
-            >
+            <Link href="/app" className="btn btn-secondary w-fit">
               Explore the dashboard
-              <span aria-hidden="true">-&gt;</span>
             </Link>
           </div>
           <div className="grid gap-3">
             {STEPS.map((step) => (
-              <div
-                key={step.title}
-                className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5"
-              >
-                <p className="text-sm font-semibold text-slate-100">{step.title}</p>
-                <p className="mt-1 text-xs text-slate-400">{step.description}</p>
+              <div key={step.title} className="surface-card-soft p-5">
+                <p className="text-sm font-semibold">{step.title}</p>
+                <p className="mt-1 text-xs text-[color:var(--muted)]">
+                  {step.description}
+                </p>
               </div>
             ))}
           </div>
         </section>
 
-        <section className="rounded-3xl border border-slate-800 bg-slate-950/70 p-8 text-center">
-          <p className="text-sm uppercase tracking-[0.3em] text-slate-500">
-            Ready to start
-          </p>
-          <h2 className="mt-3 text-3xl font-semibold text-slate-100">
+        <section className="surface-card px-8 py-10 text-center">
+          <span className="pill">Ready to start</span>
+          <h2 className="mt-4 text-3xl">
             Your next sermon clip is one upload away.
           </h2>
-          <p className="mt-2 text-sm text-slate-400">
+          <p className="mt-2 text-sm text-[color:var(--muted)]">
             Launch the dashboard and keep everything in one place.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
-            <Link
-              href="/app"
-              className="rounded-full bg-emerald-500 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-emerald-400"
-            >
+            <Link href="/app" className="btn btn-primary">
               Launch app
             </Link>
-            <Link
-              href="/app"
-              className="rounded-full border border-slate-700 px-6 py-3 text-sm text-slate-200"
-            >
+            <Link href="/app" className="btn btn-outline">
               View uploads
             </Link>
           </div>

@@ -21,7 +21,7 @@ Servicios principales (enfoque hibrido, Docker solo para infra):
 
 ## Flujo de subida de sermon
 1) La UI crea un sermon con `POST /sermons` enviando el nombre del archivo.
-2) La API crea el registro en base de datos y genera una URL firmada (presigned PUT) a MinIO.
+2) La API crea el registro en base de datos y genera una URL firmada (presigned PUT) a MinIO (expira en 3600s / 1h).
 3) El navegador sube el archivo directamente a MinIO usando esa URL.
 4) La UI confirma el fin de subida con `POST /sermons/{id}/upload-complete`.
 5) La API marca el sermon en estado `uploaded` y encola la transcripcion en Celery.
@@ -67,7 +67,7 @@ Flujo para crear un clip:
    - Renderiza con ffmpeg (preview 540x960 o final 1080x1920) y subtitulos.
    - Sube el MP4 generado a MinIO.
    - Guarda `output_url` y marca `status = done`.
-4) La API expone `download_url` (presigned GET) para descargar desde la UI.
+4) La API expone `download_url` (presigned GET, expira en 3600s / 1h) para descargar desde la UI.
 
 ## Busqueda semantica (embeddings)
 - La UI puede llamar `POST /sermons/{id}/embed` para generar embeddings.
@@ -116,7 +116,7 @@ Rutas principales:
 - Bucket: `sermon`
 - Objetos de video original: `sermons/{sermon_id}/{uuid}-{filename}`
 - Clips renderizados: `clips/{clip_id}/{uuid}.mp4`
-- La API genera URLs firmadas para subir y descargar.
+- La API genera URLs firmadas para subir y descargar (expiran en 3600s / 1h).
 
 ## Configuracion (.env)
 Variables clave:
@@ -131,10 +131,11 @@ Variables clave:
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`)
 
 ## Notas de UX
-- La web hace polling cada 3s cuando un sermon o clip esta en estado activo.
+- La web hace polling cada 5s cuando un sermon o clip esta en estado activo (configurable con `NEXT_PUBLIC_POLL_INTERVAL_MS`).
 - El progreso se muestra en el dashboard y en la vista de detalle.
 - En sugerencias, el usuario puede activar "Usar IA para sugerir clips".
 - Las sugerencias con IA muestran un badge "IA".
 - Al generar sugerencias, la UI muestra estado de "Generando sugerencias...".
 - El preview de una sugerencia dispara el render y descarga automaticamente al finalizar.
 - La lista de clips muestra solo clips manuales (se ocultan los `source=auto`).
+- La UI valida el tamano maximo de archivo con `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB`.

@@ -1,30 +1,41 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient
+} from "@tanstack/react-query";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import {
   acceptSuggestion,
   applyTrimSuggestion,
   createClip,
+  deleteSermon,
+  deleteSuggestions,
   generateEmbeddings,
   getClip,
   getSermon,
+  getTokenStats,
+  getTranscriptStats,
   getTranscriptSegments,
   listClips,
   listSuggestions,
   recordClipFeedback,
   renderClip,
   searchSermon,
-  suggestClips
+  suggestClips,
+  updateSermon
 } from "../../../../lib/api";
 
 const ClipBuilder = dynamic(() => import("./components/ClipBuilder"), {
   loading: () => (
-    <section className="rounded-2xl border border-slate-800 bg-slate-950/50">
-      <div className="h-48 animate-pulse rounded-2xl bg-slate-900/60" />
+    <section className="surface-card">
+      <div className="h-48 animate-pulse rounded-2xl bg-[color:var(--bg-elevated)]" />
     </section>
   )
 });
@@ -33,17 +44,18 @@ const SuggestedClipsPanel = dynamic(
   () => import("./components/SuggestedClipsPanel"),
   {
     loading: () => (
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
-        <div className="h-6 w-48 animate-pulse rounded bg-slate-900" />
+      <section className="surface-card p-6">
+        <div className="h-6 w-48 animate-pulse rounded bg-[color:var(--bg-elevated)]" />
       </section>
     )
   }
 );
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS) || 5000;
 const ACTIVE_STATUSES = new Set(["pending", "processing", "uploaded"]);
 const CLIP_ACTIVE_STATUSES = new Set(["pending", "processing"]);
 const PREVIEW_WARMUP_COUNT = 1;
+const SEGMENTS_PAGE_SIZE = 200;
 const SERMON_STATUS_ORDER = {
   pending: 0,
   uploaded: 1,
@@ -56,28 +68,29 @@ const SERMON_STATUS_ORDER = {
 const WORKFLOW_STATE_META = {
   done: {
     label: "Done",
-    badge: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
-    dot: "bg-emerald-400"
+    badge:
+      "border-[color:var(--accent-2)] bg-[color:var(--accent-2-soft)] text-[color:var(--accent-2-strong)]",
+    dot: "bg-[color:var(--accent-2)]"
   },
   active: {
     label: "In progress",
-    badge: "border-amber-500/40 bg-amber-500/10 text-amber-200",
-    dot: "bg-amber-400"
+    badge: "border-[#f2c37a] bg-[#f7e5c7] text-[#7a4a12]",
+    dot: "bg-[color:var(--honey)]"
   },
   idle: {
     label: "Ready",
-    badge: "border-slate-800 bg-slate-900/60 text-slate-300",
-    dot: "bg-slate-500"
+    badge: "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--muted)]",
+    dot: "bg-[color:var(--line)]"
   },
   blocked: {
     label: "Waiting",
-    badge: "border-slate-800 bg-slate-900/40 text-slate-500",
-    dot: "bg-slate-600"
+    badge: "border-[color:var(--line)] bg-transparent text-[color:var(--muted)]",
+    dot: "bg-[color:var(--line)]"
   },
   error: {
     label: "Error",
-    badge: "border-rose-500/40 bg-rose-500/10 text-rose-200",
-    dot: "bg-rose-400"
+    badge: "border-[#e6b1aa] bg-[#fbe2e0] text-[#8c2f26]",
+    dot: "bg-[#d4574a]"
   }
 };
 
@@ -118,10 +131,20 @@ function formatTrimSuggestion(trim) {
   return `IA sugiere recortar ${parts.join(" y ")}`;
 }
 
+function parseTagsInput(value) {
+  if (!value) return [];
+  const tags = value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+  return Array.from(new Set(tags));
+}
+
 const NOTICE_STYLES = {
-  info: "border-slate-800 bg-slate-900/60 text-slate-200",
-  success: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
-  error: "border-rose-500/40 bg-rose-500/10 text-rose-200"
+  info: "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--ink)]",
+  success:
+    "border-[color:var(--accent-2)] bg-[color:var(--accent-2-soft)] text-[color:var(--accent-2-strong)]",
+  error: "border-[#e6b1aa] bg-[#fbe2e0] text-[#8c2f26]"
 };
 
 const getWorkflowMeta = (state) => WORKFLOW_STATE_META[state] || WORKFLOW_STATE_META.idle;
@@ -149,12 +172,14 @@ const pollClipUntilReady = async (clipId, timeoutMs = 180_000) => {
 export default function SermonDetail({ params }) {
   const sermonId = params.id;
   const queryClient = useQueryClient();
+  const router = useRouter();
   const [error, setError] = useState("");
   const [suggestionsPending, setSuggestionsPending] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState("");
   const [useLlmSuggestions, setUseLlmSuggestions] = useState(
     process.env.NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS === "true"
   );
+  const [llmMethod, setLlmMethod] = useState("scoring");
   const [actionLoading, setActionLoading] = useState({});
   const [editingSuggestion, setEditingSuggestion] = useState(null);
   const [suggestionClipMap, setSuggestionClipMap] = useState({});
@@ -167,6 +192,21 @@ export default function SermonDetail({ params }) {
   const [suggestionsProgress, setSuggestionsProgress] = useState(0);
   const [previewClip, setPreviewClip] = useState(null);
   const [isTranscriptOpen, setIsTranscriptOpen] = useState(false);
+  const [metadataDraft, setMetadataDraft] = useState({
+    title: "",
+    description: "",
+    preacher: "",
+    series: "",
+    sermon_date: "",
+    tags: ""
+  });
+  const [metadataDirty, setMetadataDirty] = useState(false);
+  const [metadataError, setMetadataError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [tokenStats, setTokenStats] = useState(null);
+  const [tokenStatsOpen, setTokenStatsOpen] = useState(false);
+  const [tokenStatsLoading, setTokenStatsLoading] = useState(false);
+  const [tokenStatsError, setTokenStatsError] = useState("");
 
   const pushNotice = (message, tone = "info") => {
     setNotice({ message, tone });
@@ -185,6 +225,22 @@ export default function SermonDetail({ params }) {
     setSuggestionsProgress(0);
     setPreviewClip(null);
     setIsTranscriptOpen(false);
+    setLlmMethod("scoring");
+    setMetadataDraft({
+      title: "",
+      description: "",
+      preacher: "",
+      series: "",
+      sermon_date: "",
+      tags: ""
+    });
+    setMetadataDirty(false);
+    setMetadataError("");
+    setDeleteError("");
+    setTokenStats(null);
+    setTokenStatsOpen(false);
+    setTokenStatsLoading(false);
+    setTokenStatsError("");
   }, [sermonId]);
 
   useEffect(() => {
@@ -224,7 +280,9 @@ export default function SermonDetail({ params }) {
         return POLL_INTERVAL_MS;
       }
       return false;
-    }
+    },
+    staleTime: 10_000,
+    gcTime: 5 * 60 * 1000
   });
 
   const sermon = sermonQuery.data ?? null;
@@ -238,16 +296,76 @@ export default function SermonDetail({ params }) {
   const sermonSourceUrl =
     rawSourceUrl && /^https?:\/\//.test(rawSourceUrl) ? rawSourceUrl : null;
 
-  const segmentsQuery = useQuery({
+  useEffect(() => {
+    if (!sermon || metadataDirty) {
+      return;
+    }
+    setMetadataDraft({
+      title: sermon.title || "",
+      description: sermon.description || "",
+      preacher: sermon.preacher || "",
+      series: sermon.series || "",
+      sermon_date: sermon.sermon_date || "",
+      tags: Array.isArray(sermon.tags) ? sermon.tags.join(", ") : ""
+    });
+  }, [sermon, metadataDirty]);
+
+  const shouldLoadSegments =
+    Boolean(sermon) &&
+    ["transcribed", "suggested", "completed", "embedded"].includes(
+      sermon.status
+    ) &&
+    (isTranscriptOpen || Boolean(editingSuggestion) || Boolean(jumpTarget));
+
+  const segmentsQuery = useInfiniteQuery({
     queryKey: ["segments", sermonId],
-    queryFn: () => getTranscriptSegments(sermonId),
-    enabled:
-      Boolean(sermon) &&
-      ["transcribed", "suggested", "completed", "embedded"].includes(
-        sermon.status
-      )
+    queryFn: ({ pageParam = 0 }) =>
+      getTranscriptSegments(sermonId, {
+        offset: pageParam,
+        limit: SEGMENTS_PAGE_SIZE
+      }),
+    getNextPageParam: (lastPage, pages) =>
+      lastPage.length < SEGMENTS_PAGE_SIZE
+        ? undefined
+        : pages.length * SEGMENTS_PAGE_SIZE,
+    enabled: shouldLoadSegments,
+    staleTime: 60_000,
+    gcTime: 10 * 60 * 1000
   });
-  const segments = segmentsQuery.data || [];
+  const segments = segmentsQuery.data?.pages.flat() || [];
+  const segmentsLoading = segmentsQuery.isLoading;
+  const segmentsLoadingMore = segmentsQuery.isFetchingNextPage;
+
+  const transcriptStatsQuery = useQuery({
+    queryKey: ["transcript-stats", sermonId],
+    queryFn: () => getTranscriptStats(sermonId),
+    enabled: Boolean(sermonId) && isTranscriptOpen,
+    staleTime: 60_000,
+    gcTime: 5 * 60 * 1000
+  });
+  const transcriptWordCount = transcriptStatsQuery.data?.word_count ?? null;
+  const transcriptCharCount = transcriptStatsQuery.data?.char_count ?? null;
+
+  useEffect(() => {
+    if (!segmentsQuery.hasNextPage || segmentsQuery.isFetchingNextPage) {
+      return;
+    }
+    const targetEndMs = editingSuggestion?.end_ms ?? jumpTarget?.end_ms ?? null;
+    if (!targetEndMs || segments.length === 0) {
+      return;
+    }
+    const lastEndMs = segments[segments.length - 1]?.end_ms ?? null;
+    if (lastEndMs !== null && targetEndMs > lastEndMs) {
+      segmentsQuery.fetchNextPage();
+    }
+  }, [
+    editingSuggestion,
+    jumpTarget,
+    segments,
+    segmentsQuery.hasNextPage,
+    segmentsQuery.isFetchingNextPage,
+    segmentsQuery.fetchNextPage
+  ]);
 
   const clipsQuery = useQuery({
     queryKey: ["clips", sermonId],
@@ -306,6 +424,46 @@ export default function SermonDetail({ params }) {
     ? `Rendering preview (${warmupReadyCount}/${warmupTarget})`
     : "";
   const suggestionsLocked = suggestionsPending || warmupPending;
+
+  const metadataMutation = useMutation({
+    mutationFn: (payload) => updateSermon(sermonId, payload),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["sermon", sermonId], data);
+      queryClient.invalidateQueries({ queryKey: ["sermons"] });
+      setMetadataDraft({
+        title: data.title || "",
+        description: data.description || "",
+        preacher: data.preacher || "",
+        series: data.series || "",
+        sermon_date: data.sermon_date || "",
+        tags: Array.isArray(data.tags) ? data.tags.join(", ") : ""
+      });
+      setMetadataDirty(false);
+      setMetadataError("");
+      pushNotice("Metadata saved.", "success");
+    },
+    onError: (err) => {
+      const message = isSafeError(err);
+      setMetadataError(message);
+      pushNotice("Metadata save failed.", "error");
+    }
+  });
+  const metadataSaving = metadataMutation.isPending;
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteSermon(sermonId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sermons"] });
+      queryClient.removeQueries({ queryKey: ["sermon", sermonId] });
+      router.push("/app");
+    },
+    onError: (err) => {
+      const message = isSafeError(err);
+      setDeleteError(message);
+      pushNotice("Delete failed.", "error");
+    }
+  });
+  const deletePending = deleteMutation.isPending;
 
   useEffect(() => {
     if (!suggestionsPending) {
@@ -500,6 +658,49 @@ export default function SermonDetail({ params }) {
     return /^https?:\/\//.test(candidate) ? candidate : "";
   })();
 
+  const updateMetadataField = (field) => (event) => {
+    setMetadataDraft((prev) => ({ ...prev, [field]: event.target.value }));
+    setMetadataDirty(true);
+  };
+
+  const handleMetadataReset = () => {
+    if (!sermon) return;
+    setMetadataDraft({
+      title: sermon.title || "",
+      description: sermon.description || "",
+      preacher: sermon.preacher || "",
+      series: sermon.series || "",
+      sermon_date: sermon.sermon_date || "",
+      tags: Array.isArray(sermon.tags) ? sermon.tags.join(", ") : ""
+    });
+    setMetadataDirty(false);
+    setMetadataError("");
+  };
+
+  const handleMetadataSave = () => {
+    if (!sermon || metadataSaving) return;
+    setMetadataError("");
+    const payload = {
+      title: metadataDraft.title.trim() || null,
+      description: metadataDraft.description.trim() || null,
+      preacher: metadataDraft.preacher.trim() || null,
+      series: metadataDraft.series.trim() || null,
+      sermon_date: metadataDraft.sermon_date || null,
+      tags: parseTagsInput(metadataDraft.tags)
+    };
+    metadataMutation.mutate(payload);
+  };
+
+  const handleDelete = () => {
+    if (!sermon || deletePending) return;
+    const confirmed = window.confirm(
+      "Delete this sermon? This will hide the sermon and related data."
+    );
+    if (!confirmed) return;
+    setDeleteError("");
+    deleteMutation.mutate();
+  };
+
   const requestEmbeddings = async () => {
     if (embeddingLoading || sermon?.status === "embedded") {
       return;
@@ -527,7 +728,7 @@ export default function SermonDetail({ params }) {
       : "";
 
   const suggestMutation = useMutation({
-    mutationFn: () => suggestClips(sermonId, useLlmSuggestions),
+    mutationFn: () => suggestClips(sermonId, useLlmSuggestions, llmMethod),
     onMutate: () => {
       setSuggestionsPending(true);
       setSuggestionsError("");
@@ -574,6 +775,54 @@ export default function SermonDetail({ params }) {
   const handleSuggest = () => {
     suggestMutation.mutate();
     pushNotice("Generating suggestions...", "info");
+  };
+
+  const handleDeleteSuggestions = async () => {
+    if (suggestionsLocked || suggesting) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Delete all suggested clips for this sermon?"
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await deleteSuggestions(sermonId);
+      await queryClient.invalidateQueries({ queryKey: ["suggestions", sermonId] });
+      setSuggestionsPending(false);
+      pushNotice("Suggestions deleted.", "success");
+    } catch (err) {
+      setSuggestionsError(isSafeError(err));
+      pushNotice("Failed to delete suggestions.", "error");
+    }
+  };
+
+  const loadTokenStats = async () => {
+    if (tokenStatsLoading) {
+      return;
+    }
+    setTokenStatsError("");
+    setTokenStatsLoading(true);
+    try {
+      const data = await getTokenStats(sermonId);
+      setTokenStats(data);
+    } catch (err) {
+      setTokenStatsError(isSafeError(err));
+    } finally {
+      setTokenStatsLoading(false);
+    }
+  };
+
+  const handleToggleTokenStats = async () => {
+    if (tokenStatsOpen) {
+      setTokenStatsOpen(false);
+      return;
+    }
+    setTokenStatsOpen(true);
+    if (!tokenStats) {
+      await loadTokenStats();
+    }
   };
 
   const setClipActionLoading = (clipId, value) => {
@@ -710,18 +959,18 @@ export default function SermonDetail({ params }) {
   };
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-6 py-16">
+    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 py-14">
       <nav
         aria-label="Breadcrumb"
-        className="flex flex-wrap items-center gap-2 text-xs text-slate-500"
+        className="flex flex-wrap items-center gap-2 text-xs text-[color:var(--muted)]"
       >
-        <Link href="/app" className="hover:text-slate-300">
+        <Link href="/app" className="hover:text-[color:var(--accent-strong)]">
           App
         </Link>
-        <span className="text-slate-700">/</span>
-        <span className="text-slate-500">Sermons</span>
-        <span className="text-slate-700">/</span>
-        <span className="text-slate-300">
+        <span className="text-[color:var(--line)]">/</span>
+        <span className="text-[color:var(--muted)]">Sermons</span>
+        <span className="text-[color:var(--line)]">/</span>
+        <span className="text-[color:var(--ink)]">
           {sermon?.title || `Sermon #${sermonId}`}
         </span>
       </nav>
@@ -733,7 +982,7 @@ export default function SermonDetail({ params }) {
             <button
               type="button"
               onClick={() => setNotice(null)}
-              className="text-xs uppercase tracking-wide text-slate-400 hover:text-slate-200"
+              className="text-xs uppercase tracking-wide text-[color:var(--muted)] hover:text-[color:var(--ink)]"
             >
               Dismiss
             </button>
@@ -743,19 +992,19 @@ export default function SermonDetail({ params }) {
 
       {previewClip ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1f1a16]/70 px-4 py-6"
           onClick={() => setPreviewClip(null)}
         >
           <div
-            className="w-full max-w-4xl rounded-2xl border border-slate-800 bg-slate-950 p-4 shadow-xl max-h-[85vh] overflow-y-auto"
+            className="w-full max-w-4xl rounded-2xl border border-[color:var(--line)] bg-[color:var(--surface)] p-4 shadow-xl max-h-[85vh] overflow-y-auto"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <p className="text-sm font-semibold text-slate-100">
+                <p className="text-sm font-semibold text-[color:var(--ink)]">
                   Suggested clip preview
                 </p>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-[color:var(--muted)]">
                   Start {formatTimestamp(previewClip.start_ms)} - End{" "}
                   {formatTimestamp(previewClip.end_ms)}
                 </p>
@@ -763,7 +1012,7 @@ export default function SermonDetail({ params }) {
               <button
                 type="button"
                 onClick={() => setPreviewClip(null)}
-                className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-300 hover:border-slate-600"
+                className="btn btn-outline px-3 py-1 text-xs"
               >
                 Close
               </button>
@@ -773,12 +1022,12 @@ export default function SermonDetail({ params }) {
                 <video
                   controls
                   preload="metadata"
-                  className="w-full max-h-[60vh] rounded-xl border border-slate-800 bg-slate-950 object-contain"
+                  className="w-full max-h-[60vh] rounded-xl border border-[color:var(--line)] bg-[color:var(--bg-elevated)] object-contain"
                   src={previewUrl}
                 />
               </div>
             ) : (
-              <div className="mt-4 rounded-xl border border-dashed border-slate-800 px-4 py-10 text-sm text-slate-500">
+              <div className="mt-4 rounded-xl border border-dashed border-[color:var(--line)] px-4 py-10 text-sm text-[color:var(--muted)]">
                 Preview is not available yet.
               </div>
             )}
@@ -788,14 +1037,14 @@ export default function SermonDetail({ params }) {
                   href={previewUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="rounded-full border border-slate-700 px-4 py-2 text-xs text-slate-200 hover:border-slate-500"
+                  className="btn btn-outline px-4 py-2 text-xs"
                 >
                   Open in new tab
                 </a>
                 <a
                   href={previewUrl}
                   download
-                  className="rounded-full border border-emerald-500/50 px-4 py-2 text-xs text-emerald-200 hover:border-emerald-400"
+                  className="btn btn-primary px-4 py-2 text-xs"
                 >
                   Download
                 </a>
@@ -807,64 +1056,169 @@ export default function SermonDetail({ params }) {
 
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-sm uppercase tracking-[0.3em] text-slate-400">
-            Sermon detail
-          </p>
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-3xl font-semibold text-slate-100">
+          <span className="pill">Sermon detail</span>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <h1 className="text-3xl">
               {sermon?.title || `Sermon #${sermonId}`}
             </h1>
             {sermon?.status ? (
-              <span className="rounded-full border border-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+              <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[color:var(--muted)]">
                 {sermon.status}
               </span>
             ) : null}
           </div>
-          <p className="text-sm text-slate-500">{sermon?.status || "loading"}</p>
+          <p className="text-sm text-[color:var(--muted)]">
+            {sermon?.status || "loading"}
+          </p>
         </div>
-        <Link
-          href="/app"
-          className="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-300 hover:border-slate-700"
-        >
+        <Link href="/app" className="btn btn-outline">
           Back
         </Link>
       </div>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
-        <p className="text-sm text-slate-400">Status</p>
+      <section className="surface-card p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold">Metadata</p>
+            <p className="text-xs text-[color:var(--muted)]">
+              Update title, description, preacher, date, and tags.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleMetadataReset}
+              disabled={!metadataDirty || metadataSaving || !sermon}
+              className="btn btn-outline px-3 py-1 text-xs disabled:opacity-50"
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              onClick={handleMetadataSave}
+              disabled={!metadataDirty || metadataSaving || !sermon}
+              className="btn btn-primary px-3 py-1 text-xs disabled:opacity-50"
+            >
+              {metadataSaving ? "Saving..." : "Save metadata"}
+            </button>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <label className="flex flex-col gap-2 text-xs uppercase tracking-wide text-[color:var(--muted)]">
+            Title
+            <input
+              type="text"
+              value={metadataDraft.title}
+              onChange={updateMetadataField("title")}
+              className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 py-2 text-sm normal-case text-[color:var(--ink)] placeholder:text-[color:var(--muted)] focus:border-[color:var(--accent)] focus:outline-none"
+              disabled={!sermon || metadataSaving}
+              placeholder="Sermon title"
+            />
+          </label>
+          <label className="flex flex-col gap-2 text-xs uppercase tracking-wide text-[color:var(--muted)]">
+            Preacher
+            <input
+              type="text"
+              value={metadataDraft.preacher}
+              onChange={updateMetadataField("preacher")}
+              className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 py-2 text-sm normal-case text-[color:var(--ink)] placeholder:text-[color:var(--muted)] focus:border-[color:var(--accent)] focus:outline-none"
+              disabled={!sermon || metadataSaving}
+              placeholder="Speaker name"
+            />
+          </label>
+          <label className="flex flex-col gap-2 text-xs uppercase tracking-wide text-[color:var(--muted)]">
+            Date
+            <input
+              type="date"
+              value={metadataDraft.sermon_date}
+              onChange={updateMetadataField("sermon_date")}
+              className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 py-2 text-sm normal-case text-[color:var(--ink)] focus:border-[color:var(--accent)] focus:outline-none"
+              disabled={!sermon || metadataSaving}
+            />
+          </label>
+          <label className="flex flex-col gap-2 text-xs uppercase tracking-wide text-[color:var(--muted)]">
+            Series
+            <input
+              type="text"
+              value={metadataDraft.series}
+              onChange={updateMetadataField("series")}
+              className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 py-2 text-sm normal-case text-[color:var(--ink)] placeholder:text-[color:var(--muted)] focus:border-[color:var(--accent)] focus:outline-none"
+              disabled={!sermon || metadataSaving}
+              placeholder="Series name"
+            />
+          </label>
+        </div>
+        <label className="mt-4 flex flex-col gap-2 text-xs uppercase tracking-wide text-[color:var(--muted)]">
+          Description
+          <textarea
+            value={metadataDraft.description}
+            onChange={updateMetadataField("description")}
+            className="min-h-[96px] rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 py-2 text-sm normal-case text-[color:var(--ink)] placeholder:text-[color:var(--muted)] focus:border-[color:var(--accent)] focus:outline-none"
+            disabled={!sermon || metadataSaving}
+            placeholder="Notes about this sermon"
+          />
+        </label>
+        <label className="mt-4 flex flex-col gap-2 text-xs uppercase tracking-wide text-[color:var(--muted)]">
+          Tags
+          <input
+            type="text"
+            value={metadataDraft.tags}
+            onChange={updateMetadataField("tags")}
+            className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 py-2 text-sm normal-case text-[color:var(--ink)] placeholder:text-[color:var(--muted)] focus:border-[color:var(--accent)] focus:outline-none"
+            disabled={!sermon || metadataSaving}
+            placeholder="faith, hope, outreach"
+          />
+          <span className="text-[10px] text-[color:var(--muted)]">
+            Separate tags with commas.
+          </span>
+        </label>
+        {metadataError ? (
+          <p className="mt-3 text-sm text-[#a33a2b]">{metadataError}</p>
+        ) : null}
+        {metadataDirty && !metadataSaving ? (
+          <p className="mt-3 text-xs text-[color:var(--muted)]">
+            Unsaved changes.
+          </p>
+        ) : null}
+      </section>
+
+      <section className="surface-card p-6">
+        <p className="text-sm text-[color:var(--muted)]">Status</p>
         {loading ? (
-          <div className="mt-4 flex items-center gap-3 text-sm text-slate-400">
-            <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-400" />
+          <div className="mt-4 flex items-center gap-3 text-sm text-[color:var(--muted)]">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-[color:var(--line)] border-t-[color:var(--accent)]" />
             Loading status...
           </div>
         ) : statusError ? (
-          <p className="mt-2 text-sm text-red-400">{statusError}</p>
+          <p className="mt-2 text-sm text-[#a33a2b]">{statusError}</p>
         ) : (
           <div className="mt-2 space-y-2">
-            <p className="text-lg font-medium text-slate-100">{sermon?.status}</p>
+            <p className="text-lg font-semibold text-[color:var(--ink)]">
+              {sermon?.status}
+            </p>
             {progress !== null ? (
               <div className="space-y-1">
-                <div className="h-2 w-full max-w-xs rounded-full bg-slate-900">
+                <div className="h-2 w-full max-w-xs rounded-full bg-[color:var(--bg-elevated)]">
                   <div
-                    className="h-2 rounded-full bg-emerald-500/70"
+                    className="h-2 rounded-full bg-[color:var(--accent)]"
                     style={{ width: `${progress}%` }}
                   />
                 </div>
-                <p className="text-xs text-slate-500">{progress}%</p>
+                <p className="text-xs text-[color:var(--muted)]">{progress}%</p>
               </div>
             ) : null}
             {sermon?.error_message ? (
-              <p className="text-sm text-red-400">{sermon.error_message}</p>
+              <p className="text-sm text-[#a33a2b]">{sermon.error_message}</p>
             ) : null}
           </div>
         )}
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
+      <section className="surface-card p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-slate-200">Sermon preview</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm font-semibold">Sermon preview</p>
+            <p className="text-xs text-[color:var(--muted)]">
               Watch the original upload before clipping.
             </p>
           </div>
@@ -873,7 +1227,7 @@ export default function SermonDetail({ params }) {
               href={sermonSourceUrl}
               target="_blank"
               rel="noreferrer"
-              className="text-xs text-emerald-300 hover:text-emerald-200"
+              className="text-xs text-[color:var(--accent-strong)] hover:text-[color:var(--accent)]"
             >
               Open video
             </a>
@@ -884,22 +1238,22 @@ export default function SermonDetail({ params }) {
             <video
               controls
               preload="metadata"
-              className="w-full rounded-xl border border-slate-800 bg-slate-950"
+              className="w-full rounded-xl border border-[color:var(--line)] bg-[color:var(--bg-elevated)]"
               src={sermonSourceUrl}
             />
           ) : (
-            <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-800 bg-slate-950/70 px-4 py-10 text-sm text-slate-500">
+            <div className="flex items-center justify-center rounded-xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-soft)] px-4 py-10 text-sm text-[color:var(--muted)]">
               No video source available yet.
             </div>
           )}
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
+      <section className="surface-card p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-slate-200">Workflow</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm font-semibold">Workflow</p>
+            <p className="text-xs text-[color:var(--muted)]">
               Track progress across transcription, suggestions, and renders.
             </p>
           </div>
@@ -910,10 +1264,10 @@ export default function SermonDetail({ params }) {
             return (
               <div
                 key={card.title}
-                className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+                className="surface-card-soft p-4"
               >
                 <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-slate-100">{card.title}</p>
+                  <p className="text-sm font-semibold">{card.title}</p>
                   <span
                     className={`inline-flex items-center gap-2 rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${meta.badge}`}
                   >
@@ -921,11 +1275,13 @@ export default function SermonDetail({ params }) {
                     {meta.label}
                   </span>
                 </div>
-                <p className="mt-2 text-xs text-slate-500">{card.detail}</p>
+                <p className="mt-2 text-xs text-[color:var(--muted)]">
+                  {card.detail}
+                </p>
                 {card.title === "Transcription" && progress !== null ? (
-                  <div className="mt-3 h-1.5 w-full rounded-full bg-slate-900">
+                  <div className="mt-3 h-1.5 w-full rounded-full bg-[color:var(--bg-elevated)]">
                     <div
-                      className="h-1.5 rounded-full bg-emerald-500/70"
+                      className="h-1.5 rounded-full bg-[color:var(--accent)]"
                       style={{ width: `${progress}%` }}
                     />
                   </div>
@@ -936,11 +1292,11 @@ export default function SermonDetail({ params }) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 p-6">
+      <section className="surface-card p-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <p className="text-sm font-semibold text-slate-200">Semantic Search</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm font-semibold">Semantic Search</p>
+            <p className="text-xs text-[color:var(--muted)]">
               Find moments by meaning, not exact words.
             </p>
           </div>
@@ -950,12 +1306,12 @@ export default function SermonDetail({ params }) {
                 type="button"
                 onClick={requestEmbeddings}
                 disabled={embeddingLoading}
-                className="rounded-full border border-slate-800 px-4 py-2 text-xs text-slate-100 hover:border-slate-700 disabled:opacity-50"
+                className="btn btn-outline px-4 py-2 text-xs disabled:opacity-50"
               >
                 {embeddingLoading ? "Generating..." : "Generate embeddings"}
               </button>
               {embeddingRequested ? (
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-[color:var(--muted)]">
                   Embeddings are running.
                 </span>
               ) : null}
@@ -968,45 +1324,47 @@ export default function SermonDetail({ params }) {
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
             placeholder="Search the sermon..."
-            className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/60 focus:outline-none"
+            className="w-full rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-3 text-sm text-[color:var(--ink)] placeholder:text-[color:var(--muted)] focus:border-[color:var(--accent)] focus:outline-none"
           />
         </div>
         <div className="mt-4 space-y-3">
           {embeddingError ? (
-            <p className="text-sm text-red-400">{embeddingError}</p>
+            <p className="text-sm text-[#a33a2b]">{embeddingError}</p>
           ) : sermon?.status !== "embedded" ? (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-[color:var(--muted)]">
               Embeddings are required for semantic search.{" "}
               {embeddingRequested ? "Generating them now..." : "Click to generate."}
             </p>
           ) : searchLoading ? (
             <div className="space-y-2">
-              <div className="h-4 w-2/3 animate-pulse rounded bg-slate-900" />
-              <div className="h-4 w-1/2 animate-pulse rounded bg-slate-900" />
+              <div className="h-4 w-2/3 animate-pulse rounded bg-[color:var(--bg-elevated)]" />
+              <div className="h-4 w-1/2 animate-pulse rounded bg-[color:var(--bg-elevated)]" />
             </div>
           ) : searchError ? (
-            <p className="text-sm text-red-400">{searchError}</p>
+            <p className="text-sm text-[#a33a2b]">{searchError}</p>
           ) : !hasSearchInput ? (
-            <p className="text-sm text-slate-500">Type to search.</p>
+            <p className="text-sm text-[color:var(--muted)]">Type to search.</p>
           ) : searchResults.length === 0 ? (
-            <p className="text-sm text-slate-500">No matches yet.</p>
+            <p className="text-sm text-[color:var(--muted)]">No matches yet.</p>
           ) : (
             searchResults.map((result) => (
               <div
                 key={result.segment_id}
-                className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+                className="surface-card-soft p-4"
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                      <span className="rounded-full border border-slate-800 px-2 py-0.5">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-[color:var(--muted)]">
+                      <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5">
                         Start {formatTimestamp(result.start_ms)}
                       </span>
-                      <span className="rounded-full border border-slate-800 px-2 py-0.5">
+                      <span className="rounded-full border border-[color:var(--line)] px-2 py-0.5">
                         End {formatTimestamp(result.end_ms)}
                       </span>
                     </div>
-                    <p className="mt-1 text-sm text-slate-200">{result.text}</p>
+                    <p className="mt-1 text-sm text-[color:var(--ink)]">
+                      {result.text}
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -1016,7 +1374,7 @@ export default function SermonDetail({ params }) {
                         end_ms: result.end_ms
                       })
                     }
-                    className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-100 hover:border-slate-700"
+                    className="btn btn-outline px-3 py-1 text-xs"
                   >
                     Jump
                   </button>
@@ -1027,18 +1385,32 @@ export default function SermonDetail({ params }) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50 px-6 py-4">
+      <section className="surface-card px-6 py-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-slate-200">Transcript</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm font-semibold">Transcript</p>
+            <p className="text-xs text-[color:var(--muted)]">
               Expand to select segments and create a clip.
             </p>
+            {isTranscriptOpen ? (
+              <p className="text-xs text-[color:var(--muted)]">
+                {transcriptStatsQuery.isLoading
+                  ? "Counting words..."
+                  : transcriptWordCount !== null
+                  ? `Total words: ${transcriptWordCount.toLocaleString()}`
+                  : "Total words: unavailable"}
+                {transcriptStatsQuery.isLoading
+                  ? ""
+                  : transcriptCharCount !== null
+                  ? ` · Total characters: ${transcriptCharCount.toLocaleString()}`
+                  : " · Total characters: unavailable"}
+              </p>
+            ) : null}
           </div>
           <button
             type="button"
             onClick={() => setIsTranscriptOpen((prev) => !prev)}
-            className="rounded-full border border-slate-800 px-3 py-1 text-xs text-slate-300 hover:border-slate-700"
+            className="btn btn-outline px-3 py-1 text-xs"
           >
             {isTranscriptOpen ? "Hide transcript" : "Show transcript"}
           </button>
@@ -1046,25 +1418,67 @@ export default function SermonDetail({ params }) {
       </section>
 
       {isTranscriptOpen ? (
-        <ClipBuilder
-          title="Transcript"
-          subtitle="Select a start segment and an end segment."
-          segments={segments}
-          mediaUrl={sermonSourceUrl}
-          initialStartMs={jumpTarget?.start_ms ?? null}
-          initialEndMs={jumpTarget?.end_ms ?? null}
-          actionLabel="Create clip"
-          busyLabel="Creating..."
-          onSubmit={({ start_ms, end_ms }) =>
-            handleCreateClip({ start_ms, end_ms, render_type: "final" })
-          }
-        />
+        <>
+          <section className="surface-card-soft px-6 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-[color:var(--muted)]">
+              <span>
+                {segmentsLoading && segments.length === 0
+                  ? "Loading transcript..."
+                  : `${segments.length} segments loaded`}
+              </span>
+              {segmentsQuery.hasNextPage ? (
+                <button
+                  type="button"
+                  onClick={() => segmentsQuery.fetchNextPage()}
+                  disabled={segmentsLoadingMore}
+                  className="btn btn-outline px-3 py-1 text-xs disabled:opacity-50"
+                >
+                  {segmentsLoadingMore ? "Loading..." : "Load more"}
+                </button>
+              ) : segments.length > 0 ? (
+                <span className="text-[10px] uppercase tracking-wide text-[color:var(--muted)]">
+                  All segments loaded
+                </span>
+              ) : null}
+            </div>
+          </section>
+          {segmentsLoading && segments.length === 0 ? (
+            <section className="surface-card p-6">
+              <div className="flex items-center gap-3 text-sm text-[color:var(--muted)]">
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-[color:var(--line)] border-t-[color:var(--accent)]" />
+                Loading transcript...
+              </div>
+            </section>
+          ) : (
+            <ClipBuilder
+              title="Transcript"
+              subtitle="Select a start segment and an end segment."
+              segments={segments}
+              mediaUrl={sermonSourceUrl}
+              initialStartMs={jumpTarget?.start_ms ?? null}
+              initialEndMs={jumpTarget?.end_ms ?? null}
+              actionLabel="Create clip"
+              busyLabel="Creating..."
+              onSubmit={({ start_ms, end_ms }) =>
+                handleCreateClip({ start_ms, end_ms, render_type: "final" })
+              }
+            />
+          )}
+        </>
       ) : null}
 
       <SuggestedClipsPanel
         useLlmSuggestions={useLlmSuggestions}
         onToggleUseLlm={setUseLlmSuggestions}
+        llmMethod={llmMethod}
+        onSelectLlmMethod={setLlmMethod}
         onSuggest={handleSuggest}
+        onDeleteSuggestions={handleDeleteSuggestions}
+        onToggleTokenStats={handleToggleTokenStats}
+        tokenStats={tokenStats}
+        tokenStatsOpen={tokenStatsOpen}
+        tokenStatsLoading={tokenStatsLoading}
+        tokenStatsError={tokenStatsError}
         suggesting={suggesting}
         suggestionsLoading={suggestionsLoading}
         suggestionsError={suggestionsErrorMessage}
@@ -1086,57 +1500,66 @@ export default function SermonDetail({ params }) {
       />
 
       {editingSuggestion ? (
-        <ClipBuilder
-          title="Edit Suggested Clip"
-          subtitle="Adjust the range and save as a manual clip."
-          segments={segments}
-          mediaUrl={sermonSourceUrl}
-          initialStartMs={editingSuggestion.start_ms}
-          initialEndMs={editingSuggestion.end_ms}
-          actionLabel="Save clip"
-          busyLabel="Saving..."
-          onSubmit={async ({ start_ms, end_ms }) => {
-            await handleCreateClip({ start_ms, end_ms, render_type: "final" });
-            setEditingSuggestion(null);
-          }}
-          onCancel={() => setEditingSuggestion(null)}
-        />
+        segmentsLoading && segments.length === 0 ? (
+          <section className="surface-card p-6">
+            <div className="flex items-center gap-3 text-sm text-[color:var(--muted)]">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-[color:var(--line)] border-t-[color:var(--accent)]" />
+              Loading transcript...
+            </div>
+          </section>
+        ) : (
+          <ClipBuilder
+            title="Edit Suggested Clip"
+            subtitle="Adjust the range and save as a manual clip."
+            segments={segments}
+            mediaUrl={sermonSourceUrl}
+            initialStartMs={editingSuggestion.start_ms}
+            initialEndMs={editingSuggestion.end_ms}
+            actionLabel="Save clip"
+            busyLabel="Saving..."
+            onSubmit={async ({ start_ms, end_ms }) => {
+              await handleCreateClip({ start_ms, end_ms, render_type: "final" });
+              setEditingSuggestion(null);
+            }}
+            onCancel={() => setEditingSuggestion(null)}
+          />
+        )
       ) : null}
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/50">
-        <div className="border-b border-slate-800 px-6 py-4">
-          <p className="text-sm font-semibold text-slate-200">Clips</p>
+      <section className="surface-card">
+        <div className="border-b border-[color:var(--line)] px-6 py-4">
+          <p className="text-sm font-semibold">Clips</p>
         </div>
-        <div className="divide-y divide-slate-900 px-6 py-4">
+        <div className="divide-y divide-[color:var(--line)] px-6 py-4">
           {clipsLoading ? (
             <div className="space-y-3">
-              <div className="h-6 w-48 animate-pulse rounded bg-slate-900" />
-              <div className="h-6 w-40 animate-pulse rounded bg-slate-900" />
+              <div className="h-6 w-48 animate-pulse rounded bg-[color:var(--bg-elevated)]" />
+              <div className="h-6 w-40 animate-pulse rounded bg-[color:var(--bg-elevated)]" />
             </div>
           ) : clips.length === 0 ? (
-            <p className="text-sm text-slate-500">No clips yet.</p>
+            <p className="text-sm text-[color:var(--muted)]">No clips yet.</p>
           ) : (
             clips.map((clip) => (
               <div key={clip.id} className="flex items-center justify-between py-3">
                 <div>
-                  <p className="text-sm text-slate-200">
+                  <p className="text-sm text-[color:var(--ink)]">
                     {Math.round((clip.end_ms - clip.start_ms) / 1000)}s clip
                   </p>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-[color:var(--muted)]">
                     {formatClipStatus(clip.status)}
                   </p>
                 </div>
                 {clip.status === "done" ? (
                   <a
                     href={clip.download_url || clip.output_url || "#"}
-                    className="text-sm text-emerald-400 hover:text-emerald-300"
+                    className="text-sm text-[color:var(--accent-strong)] hover:text-[color:var(--accent)]"
                     target="_blank"
                     rel="noreferrer"
                   >
                     Download
                   </a>
                 ) : (
-                  <span className="text-xs text-slate-500">
+                  <span className="text-xs text-[color:var(--muted)]">
                     {formatClipStatus(clip.status)}
                   </span>
                 )}
@@ -1144,6 +1567,28 @@ export default function SermonDetail({ params }) {
             ))
           )}
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-[#e6b1aa] bg-[#fbe2e0] p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-[#8c2f26]">Danger zone</p>
+            <p className="text-xs text-[#8c2f26]/80">
+              Delete hides this sermon, clips, and transcript data.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={!sermon || deletePending}
+            className="btn btn-danger px-4 py-2 text-xs disabled:opacity-50"
+          >
+            {deletePending ? "Deleting..." : "Delete sermon"}
+          </button>
+        </div>
+        {deleteError ? (
+          <p className="mt-3 text-sm text-[#8c2f26]">{deleteError}</p>
+        ) : null}
       </section>
     </main>
   );

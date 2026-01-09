@@ -3,8 +3,8 @@ import os
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, update
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from src.config import settings
@@ -43,7 +43,15 @@ logger = logging.getLogger(__name__)
 def create_sermon(
     payload: SermonCreate, session: Session = Depends(get_session)
 ) -> SermonCreateResponse:
-    sermon = Sermon(title=payload.title, progress=0)
+    sermon = Sermon(
+        title=payload.title,
+        description=payload.description,
+        preacher=payload.preacher,
+        series=payload.series,
+        sermon_date=payload.sermon_date,
+        tags=payload.tags,
+        progress=0,
+    )
     session.add(sermon)
     session.commit()
     session.refresh(sermon)
@@ -67,12 +75,38 @@ def create_sermon(
 
 
 @router.get("/", response_model=list[SermonRead])
-def list_sermons(session: Session = Depends(get_session)) -> list[Sermon]:
-    result = session.execute(
-        select(Sermon)
-        .where(Sermon.deleted_at.is_(None))
-        .order_by(Sermon.id.desc())
-    )
+def list_sermons(
+    session: Session = Depends(get_session),
+    limit: int | None = None,
+    offset: int = 0,
+    q: str | None = None,
+    status: SermonStatus | None = None,
+    tag: str | None = None,
+) -> list[Sermon]:
+    stmt = select(Sermon).where(Sermon.deleted_at.is_(None))
+    if status is not None:
+        stmt = stmt.where(Sermon.status == status)
+    query = (q or "").strip()
+    if query:
+        term = f"%{query}%"
+        clauses = [
+            Sermon.title.ilike(term),
+            Sermon.description.ilike(term),
+            Sermon.preacher.ilike(term),
+            Sermon.series.ilike(term),
+        ]
+        if query.isdigit():
+            clauses.append(Sermon.id == int(query))
+        stmt = stmt.where(or_(*clauses))
+    tag_value = (tag or "").strip()
+    if tag_value:
+        stmt = stmt.where(Sermon.tags.contains([tag_value]))
+    stmt = stmt.order_by(Sermon.sermon_date.desc().nullslast(), Sermon.id.desc())
+    if offset > 0:
+        stmt = stmt.offset(offset)
+    if limit is not None and limit > 0:
+        stmt = stmt.limit(min(limit, 200))
+    result = session.execute(stmt)
     sermons = list(result.scalars().all())
     for sermon in sermons:
         if sermon.source_url:
@@ -158,13 +192,16 @@ def delete_sermon(sermon_id: int, session: Session = Depends(get_session)) -> No
 
 @router.get("/{sermon_id}/segments", response_model=list[TranscriptSegmentRead])
 def list_segments(
-    sermon_id: int, session: Session = Depends(get_session)
+    sermon_id: int,
+    session: Session = Depends(get_session),
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[TranscriptSegment]:
     sermon = session.get(Sermon, sermon_id)
     if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
 
-    result = session.execute(
+    stmt = (
         select(TranscriptSegment)
         .where(
             TranscriptSegment.sermon_id == sermon_id,
@@ -172,7 +209,39 @@ def list_segments(
         )
         .order_by(TranscriptSegment.start_ms.asc())
     )
+    if offset > 0:
+        stmt = stmt.offset(offset)
+    if limit is not None and limit > 0:
+        stmt = stmt.limit(min(limit, 1000))
+    result = session.execute(stmt)
     return list(result.scalars().all())
+
+
+@router.get("/{sermon_id}/transcript-stats")
+def transcript_stats(
+    sermon_id: int, session: Session = Depends(get_session)
+) -> dict:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon or sermon.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    texts = session.execute(
+        select(TranscriptSegment.text).where(
+            TranscriptSegment.sermon_id == sermon_id,
+            TranscriptSegment.deleted_at.is_(None),
+        )
+    ).scalars()
+    word_count = 0
+    char_count = 0
+    for text in texts:
+        if text:
+            word_count += len(text.split())
+            char_count += len(text)
+    return {
+        "sermon_id": sermon_id,
+        "word_count": word_count,
+        "char_count": char_count,
+    }
 
 
 @router.post(
@@ -240,8 +309,12 @@ def embed_sermon(
 def suggest_clips(
     sermon_id: int,
     use_llm: bool | None = None,
+    llm_method: str = Query(
+        "scoring", regex="^(scoring|selection|generation|full-context)$"
+    ),
     session: Session = Depends(get_session),
 ) -> SuggestClipsResponse:
+    """Enqueue clip suggestions using LLM scoring or LLM selection."""
     sermon = session.get(Sermon, sermon_id)
     if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
@@ -253,7 +326,7 @@ def suggest_clips(
         celery_app.send_task(
             "worker.suggest_clips",
             args=[sermon.id],
-            kwargs={"use_llm": use_llm_effective},
+            kwargs={"use_llm": use_llm_effective, "llm_method": llm_method},
             priority=settings.celery_priority_suggest,
         )
     except Exception as exc:
@@ -292,6 +365,129 @@ def list_suggestions(
             except Exception:
                 logger.exception("Failed to create presigned URL for clip %s", clip.id)
     return ClipSuggestionsResponse(sermon_id=sermon_id, clips=clips)
+
+
+@router.delete(
+    "/{sermon_id}/suggestions",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_suggestions(
+    sermon_id: int, session: Session = Depends(get_session)
+) -> None:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon or sermon.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    now = datetime.utcnow()
+    clip_ids = (
+        select(Clip.id)
+        .where(
+            Clip.sermon_id == sermon_id,
+            Clip.source == ClipSource.auto,
+            Clip.deleted_at.is_(None),
+        )
+    )
+    session.execute(
+        update(Clip)
+        .where(Clip.id.in_(clip_ids))
+        .values(deleted_at=now, updated_at=now)
+    )
+    session.execute(
+        update(ClipFeedback)
+        .where(ClipFeedback.clip_id.in_(clip_ids))
+        .where(ClipFeedback.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
+    )
+    session.commit()
+
+
+@router.get(
+    "/{sermon_id}/token-stats",
+)
+def token_stats(
+    sermon_id: int, session: Session = Depends(get_session)
+) -> dict:
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon or sermon.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    rows = session.execute(
+        select(
+            Clip.llm_method,
+            func.count(Clip.id),
+            func.coalesce(func.sum(Clip.llm_prompt_tokens), 0),
+            func.coalesce(func.sum(Clip.llm_completion_tokens), 0),
+            func.coalesce(func.sum(Clip.llm_total_tokens), 0),
+            func.coalesce(func.sum(Clip.llm_estimated_cost), 0.0),
+            func.coalesce(
+                func.sum(Clip.llm_output_tokens),
+                func.sum(Clip.llm_completion_tokens),
+                0,
+            ),
+            func.coalesce(func.sum(Clip.llm_cache_hit_tokens), 0),
+            func.coalesce(func.sum(Clip.llm_cache_miss_tokens), 0),
+        )
+        .where(
+            Clip.sermon_id == sermon_id,
+            Clip.source == ClipSource.auto,
+            Clip.deleted_at.is_(None),
+            Clip.llm_method.is_not(None),
+        )
+        .group_by(Clip.llm_method)
+    ).all()
+
+    methods: dict[str, dict] = {}
+    for row in rows:
+        method = row[0]
+        methods[method] = {
+            "clips": int(row[1] or 0),
+            "prompt_tokens": int(row[2] or 0),
+            "completion_tokens": int(row[3] or 0),
+            "total_tokens": int(row[4] or 0),
+            "estimated_cost_usd": float(row[5] or 0.0),
+            "output_tokens": int(row[6] or 0),
+            "cache_hit_tokens": int(row[7] or 0),
+            "cache_miss_tokens": int(row[8] or 0),
+        }
+
+    comparison = None
+    base_method = None
+    compare_method = None
+    if "selection" in methods and "full-context" in methods:
+        base_method = "selection"
+        compare_method = "full-context"
+    elif "generation" in methods and "full-context" in methods:
+        base_method = "generation"
+        compare_method = "full-context"
+    elif "scoring" in methods and "full-context" in methods:
+        base_method = "scoring"
+        compare_method = "full-context"
+    elif "selection" in methods and "generation" in methods:
+        base_method = "selection"
+        compare_method = "generation"
+    elif "scoring" in methods and "selection" in methods:
+        base_method = "scoring"
+        compare_method = "selection"
+    elif "scoring" in methods and "generation" in methods:
+        base_method = "scoring"
+        compare_method = "generation"
+    if base_method and compare_method:
+        base = methods[base_method]
+        compare = methods[compare_method]
+        token_delta = compare["total_tokens"] - base["total_tokens"]
+        cost_delta = compare["estimated_cost_usd"] - base["estimated_cost_usd"]
+        token_pct_increase = None
+        if base["total_tokens"] > 0:
+            token_pct_increase = (token_delta / base["total_tokens"]) * 100.0
+        comparison = {
+            "base_method": base_method,
+            "compare_method": compare_method,
+            "token_delta": token_delta,
+            "token_pct_increase": token_pct_increase,
+            "cost_delta_usd": cost_delta,
+        }
+
+    return {"sermon_id": sermon_id, "methods": methods, "comparison": comparison}
 
 
 @router.get(

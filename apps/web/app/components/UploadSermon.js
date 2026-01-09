@@ -12,10 +12,18 @@ import {
   uploadToPresignedUrl
 } from "../../lib/api";
 
+const envLimit = Number(process.env.NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB);
+const MAX_UPLOAD_MB =
+  Number.isFinite(envLimit) && envLimit > 0 ? envLimit : 2048;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+
 const uploadSchema = z.object({
   file: z
     .instanceof(File, { message: "Select a video file." })
     .refine((file) => file.size > 0, { message: "File is empty." })
+    .refine((file) => file.size <= MAX_UPLOAD_BYTES, {
+      message: `File must be <= ${MAX_UPLOAD_MB} MB.`
+    })
     .refine((file) => file.type.startsWith("video/"), {
       message: "File must be a video."
     })
@@ -68,7 +76,7 @@ export default function UploadSermon({ onUploaded }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="inline-flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 hover:border-slate-700">
+      <label className="inline-flex items-center gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-2 text-sm font-semibold text-[color:var(--ink)] hover:border-[color:var(--accent)]">
         <input
           {...fileField}
           ref={(node) => {
@@ -84,7 +92,7 @@ export default function UploadSermon({ onUploaded }) {
         <span className="inline-flex items-center gap-2">
           {uploadMutation.isPending ? (
             <>
-              <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-400" />
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-[color:var(--line)] border-t-[color:var(--accent)]" />
               Uploading...
             </>
           ) : (
@@ -92,8 +100,11 @@ export default function UploadSermon({ onUploaded }) {
           )}
         </span>
       </label>
+      <p className="text-xs text-[color:var(--muted)]">
+        Max size {MAX_UPLOAD_MB} MB.
+      </p>
       {errorMessage ? (
-        <p className="text-sm text-red-400">{errorMessage}</p>
+        <p className="text-sm text-[#a33a2b]">{errorMessage}</p>
       ) : null}
     </div>
   );
