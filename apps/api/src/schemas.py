@@ -57,6 +57,7 @@ class SermonRead(ORMModel):
     id: int
     title: Optional[str]
     source_url: Optional[str]
+    source_download_url: Optional[str] = None
     progress: int
     status: SermonStatus
     error_message: Optional[str] = None

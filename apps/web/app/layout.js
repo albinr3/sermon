@@ -2,8 +2,8 @@ import "./globals.css";
 import Providers from "./providers";
 
 export const metadata = {
-  title: "Sermon MVP",
-  description: "Sermon transcript to clip"
+  title: "SermonClip Studio",
+  description: "Upload sermons, track transcription, and create shareable clips."
 };
 
 export default function RootLayout({ children }) {

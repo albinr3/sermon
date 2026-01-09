@@ -12,7 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from faster_whisper import WhisperModel
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import OperationalError
 
 from src.ass import build_ass_from_segments
@@ -105,13 +105,16 @@ LLM_SCORE_WEIGHT = 0.7
 LLM_MAX_CANDIDATES = 15
 LLM_TIMEOUT_SEC = 60.0
 LLM_TRIM_CONFIDENCE_MIN = 0.8
+PREVIEW_WARMUP_COUNT = 1
 PREVIEW_SETTINGS = {
-    "width": 540,
-    "height": 960,
-    "video_bitrate": "900k",
-    "audio_bitrate": "96k",
-    "maxrate": "1000k",
-    "bufsize": "2000k",
+    "width": 360,
+    "height": 640,
+    "video_bitrate": "400k",
+    "audio_bitrate": "64k",
+    "maxrate": "500k",
+    "bufsize": "1000k",
+    "preset": "ultrafast",
+    "crf": "28",
 }
 FINAL_SETTINGS = {
     "width": 1080,
@@ -120,6 +123,8 @@ FINAL_SETTINGS = {
     "audio_bitrate": "128k",
     "maxrate": "4000k",
     "bufsize": "8000k",
+    "preset": "medium",
+    "crf": "23",
 }
 RETRYABLE_EXCEPTIONS = (
     BotoCoreError,
@@ -913,22 +918,29 @@ def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
         )
 
         created = 0
-        for candidate in candidates:
-            session.add(
-                Clip(
-                    sermon_id=sermon_id,
-                    start_ms=candidate["start_ms"],
-                    end_ms=candidate["end_ms"],
-                    source=ClipSource.auto,
-                    score=candidate["score"],
-                    rationale=candidate["rationale"],
-                    use_llm=candidate["use_llm"],
-                    llm_trim=candidate.get("llm_trim"),
-                    llm_trim_confidence=candidate.get("llm_trim_confidence"),
-                    trim_applied=bool(candidate.get("trim_applied")),
-                    status=ClipStatus.pending,
-                )
+        preview_ids = []
+        for index, candidate in enumerate(candidates):
+            should_warmup = index < PREVIEW_WARMUP_COUNT
+            clip = Clip(
+                sermon_id=sermon_id,
+                start_ms=candidate["start_ms"],
+                end_ms=candidate["end_ms"],
+                source=ClipSource.auto,
+                score=candidate["score"],
+                rationale=candidate["rationale"],
+                use_llm=candidate["use_llm"],
+                llm_trim=candidate.get("llm_trim"),
+                llm_trim_confidence=candidate.get("llm_trim_confidence"),
+                trim_applied=bool(candidate.get("trim_applied")),
+                status=ClipStatus.pending,
+                render_type=ClipRenderType.preview
+                if should_warmup
+                else ClipRenderType.final,
             )
+            session.add(clip)
+            session.flush()
+            if should_warmup:
+                preview_ids.append(clip.id)
             created += 1
 
         session.commit()
@@ -953,6 +965,38 @@ def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
             created,
             sermon_id,
         )
+
+        if preview_ids:
+            logger.info(
+                "Auto-generating %s previews for sermon %s",
+                len(preview_ids),
+                sermon_id,
+            )
+            for index, clip_id in enumerate(preview_ids):
+                try:
+                    signature = celery_app.signature(
+                        "worker.render_clip",
+                        args=[clip_id],
+                    ).set(
+                        queue="previews",
+                        priority=settings.celery_priority_render_preview,
+                    )
+                    if index == 0:
+                        callback = celery_app.signature(
+                            "worker.enqueue_pending_previews",
+                            args=[sermon_id],
+                        ).set(
+                            queue="previews",
+                            priority=settings.celery_priority_render_preview,
+                            immutable=True,
+                        )
+                        signature.link(callback)
+                    signature.apply_async()
+                except Exception:
+                    logger.exception(
+                        "Failed to enqueue preview render for clip %s", clip_id
+                    )
+
         return {"sermon_id": sermon_id, "suggestions": created}
     except Exception as exc:
         session.rollback()
@@ -962,6 +1006,80 @@ def suggest_clips(self, sermon_id: int, use_llm: bool | None = None) -> dict:
             sermon.error_message = str(exc)[:1000]
             session.commit()
         logger.exception("Failed to suggest clips for sermon %s", sermon_id)
+        raise
+    finally:
+        session.close()
+
+
+@celery_app.task(
+    name="worker.enqueue_pending_previews",
+    bind=True,
+    max_retries=settings.celery_max_retries,
+)
+def enqueue_pending_previews(self, sermon_id: int) -> dict:
+    session = SessionLocal()
+    try:
+        pending_ids = list(
+            session.execute(
+                select(Clip.id)
+                .where(Clip.sermon_id == sermon_id)
+                .where(Clip.source == ClipSource.auto)
+                .where(
+                    or_(
+                        Clip.render_type == ClipRenderType.preview,
+                        Clip.render_type == ClipRenderType.final,
+                        Clip.render_type.is_(None),
+                    )
+                )
+                .where(Clip.output_url.is_(None))
+                .where(Clip.status == ClipStatus.pending)
+                .where(Clip.deleted_at.is_(None))
+            ).scalars()
+        )
+        if not pending_ids:
+            return {"sermon_id": sermon_id, "queued": 0}
+
+        session.execute(
+            update(Clip)
+            .where(Clip.id.in_(pending_ids))
+            .values(render_type=ClipRenderType.preview)
+        )
+        session.commit()
+
+        enqueued_ids = []
+        for clip_id in pending_ids:
+            try:
+                self.app.send_task(
+                    "worker.render_clip",
+                    args=[clip_id],
+                    queue="previews",
+                    priority=settings.celery_priority_render_preview,
+                )
+                enqueued_ids.append(clip_id)
+            except Exception:
+                logger.exception(
+                    "Failed to enqueue preview render for clip %s",
+                    clip_id,
+                )
+
+        if enqueued_ids:
+            session.execute(
+                update(Clip)
+                .where(Clip.id.in_(enqueued_ids))
+                .values(status=ClipStatus.processing)
+            )
+            session.commit()
+
+        logger.info(
+            "Queued %s background previews for sermon %s",
+            len(enqueued_ids),
+            sermon_id,
+        )
+        return {"sermon_id": sermon_id, "queued": len(enqueued_ids)}
+    except Exception as exc:
+        session.rollback()
+        _maybe_retry(self, exc, label=f"Enqueue previews for sermon {sermon_id}")
+        logger.exception("Failed to enqueue previews for sermon %s", sermon_id)
         raise
     finally:
         session.close()
@@ -1112,6 +1230,8 @@ def render_clip(self, clip_id: int) -> dict:
         audio_bitrate = settings["audio_bitrate"]
         maxrate = settings["maxrate"]
         bufsize = settings["bufsize"]
+        preset = settings.get("preset", "veryfast")
+        crf = settings.get("crf")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = f"{tmpdir}/input.mp4"
@@ -1142,7 +1262,8 @@ def render_clip(self, clip_id: int) -> dict:
                         "-c:v",
                         "libx264",
                         "-preset",
-                        "veryfast",
+                        preset,
+                        *(["-crf", crf] if crf else []),
                         "-b:v",
                         video_bitrate,
                         "-maxrate",
@@ -1206,7 +1327,8 @@ def render_clip(self, clip_id: int) -> dict:
                                 "-c:v",
                                 "libx264",
                                 "-preset",
-                                "veryfast",
+                                preset,
+                                *(["-crf", crf] if crf else []),
                                 "-b:v",
                                 video_bitrate,
                                 "-maxrate",
@@ -1245,7 +1367,8 @@ def render_clip(self, clip_id: int) -> dict:
                                 "-c:v",
                                 "libx264",
                                 "-preset",
-                                "veryfast",
+                                preset,
+                                *(["-crf", crf] if crf else []),
                                 "-b:v",
                                 video_bitrate,
                                 "-maxrate",
@@ -1274,7 +1397,8 @@ def render_clip(self, clip_id: int) -> dict:
                                 "-c:v",
                                 "libx264",
                                 "-preset",
-                                "veryfast",
+                                preset,
+                                *(["-crf", crf] if crf else []),
                                 "-b:v",
                                 video_bitrate,
                                 "-maxrate",
@@ -1315,7 +1439,8 @@ def render_clip(self, clip_id: int) -> dict:
                             "-c:v",
                             "libx264",
                             "-preset",
-                            "veryfast",
+                            preset,
+                            *(["-crf", crf] if crf else []),
                             "-b:v",
                             video_bitrate,
                             "-maxrate",
@@ -1350,7 +1475,8 @@ def render_clip(self, clip_id: int) -> dict:
                         "-c:v",
                         "libx264",
                         "-preset",
-                        "veryfast",
+                        preset,
+                        *(["-crf", crf] if crf else []),
                         "-b:v",
                         video_bitrate,
                         "-maxrate",
@@ -1375,6 +1501,73 @@ def render_clip(self, clip_id: int) -> dict:
         clip.output_url = object_key
         clip.status = ClipStatus.done
         session.commit()
+
+        if (
+            clip.render_type == ClipRenderType.preview
+            and clip.source == ClipSource.auto
+            and clip.deleted_at is None
+        ):
+            done_count = session.execute(
+                select(func.count())
+                .where(Clip.sermon_id == clip.sermon_id)
+                .where(Clip.source == ClipSource.auto)
+                .where(Clip.render_type == ClipRenderType.preview)
+                .where(Clip.output_url.is_not(None))
+                .where(Clip.deleted_at.is_(None))
+            ).scalar()
+            done_count = int(done_count or 0)
+            if done_count >= PREVIEW_WARMUP_COUNT:
+                background_ids = list(
+                    session.execute(
+                        select(Clip.id)
+                        .where(Clip.sermon_id == clip.sermon_id)
+                        .where(Clip.source == ClipSource.auto)
+                        .where(
+                            or_(
+                                Clip.render_type == ClipRenderType.final,
+                                Clip.render_type.is_(None),
+                            )
+                        )
+                        .where(Clip.output_url.is_(None))
+                        .where(Clip.status == ClipStatus.pending)
+                        .where(Clip.deleted_at.is_(None))
+                    ).scalars()
+                )
+                if background_ids:
+                    session.execute(
+                        update(Clip)
+                        .where(Clip.id.in_(background_ids))
+                        .values(render_type=ClipRenderType.preview)
+                    )
+                    session.commit()
+                    enqueued_ids = []
+                    for clip_id in background_ids:
+                        try:
+                            celery_app.send_task(
+                                "worker.render_clip",
+                                args=[clip_id],
+                                queue="previews",
+                                priority=settings.celery_priority_render_preview,
+                            )
+                            enqueued_ids.append(clip_id)
+                        except Exception:
+                            logger.exception(
+                                "Failed to enqueue preview render for clip %s",
+                                clip_id,
+                            )
+                    if enqueued_ids:
+                        session.execute(
+                            update(Clip)
+                            .where(Clip.id.in_(enqueued_ids))
+                            .values(status=ClipStatus.processing)
+                        )
+                        session.commit()
+                    logger.info(
+                        "Queued %s background previews for sermon %s",
+                        len(enqueued_ids),
+                        clip.sermon_id,
+                    )
+
         return {"clip_id": clip.id, "output_key": object_key}
     except Exception as exc:
         session.rollback()

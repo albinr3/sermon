@@ -73,7 +73,18 @@ def list_sermons(session: Session = Depends(get_session)) -> list[Sermon]:
         .where(Sermon.deleted_at.is_(None))
         .order_by(Sermon.id.desc())
     )
-    return list(result.scalars().all())
+    sermons = list(result.scalars().all())
+    for sermon in sermons:
+        if sermon.source_url:
+            try:
+                sermon.source_download_url = create_presigned_get_url(
+                    sermon.source_url, 3600
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to create presigned URL for sermon %s", sermon.id
+                )
+    return sermons
 
 
 @router.get("/{sermon_id}", response_model=SermonRead)
@@ -81,6 +92,15 @@ def get_sermon(sermon_id: int, session: Session = Depends(get_session)) -> Sermo
     sermon = session.get(Sermon, sermon_id)
     if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
+    if sermon.source_url:
+        try:
+            sermon.source_download_url = create_presigned_get_url(
+                sermon.source_url, 3600
+            )
+        except Exception:
+            logger.exception(
+                "Failed to create presigned URL for sermon %s", sermon.id
+            )
     return sermon
 
 

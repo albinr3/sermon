@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     celery_retry_backoff_max: int = 300
     celery_retry_jitter: int = 3
     celery_default_priority: int = 5
+    celery_priority_render_preview: int = 8
+    celery_priority_render_final: int = 4
 
 
 settings = Settings()

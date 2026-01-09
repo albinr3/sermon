@@ -63,7 +63,8 @@ pnpm install
 pnpm --filter web dev
 ```
 
-UI: http://localhost:3000
+Landing: http://localhost:3000
+App: http://localhost:3000/app
 API: http://localhost:8000
 Flower: http://localhost:5555 (opcional)
 

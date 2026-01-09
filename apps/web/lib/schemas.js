@@ -21,6 +21,7 @@ export const sermonSchema = z.object({
   id: z.number(),
   title: z.string().nullable(),
   source_url: z.string().nullable(),
+  source_download_url: z.string().nullable().optional(),
   progress: z.number(),
   status: sermonStatusSchema,
   error_message: z.string().nullable().optional(),

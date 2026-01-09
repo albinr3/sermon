@@ -81,7 +81,16 @@ export default function UploadSermon({ onUploaded }) {
           onChange={handleFileChange}
           disabled={uploadMutation.isPending}
         />
-        <span>{uploadMutation.isPending ? "Uploading..." : "Upload sermon"}</span>
+        <span className="inline-flex items-center gap-2">
+          {uploadMutation.isPending ? (
+            <>
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-400" />
+              Uploading...
+            </>
+          ) : (
+            "Upload sermon"
+          )}
+        </span>
       </label>
       {errorMessage ? (
         <p className="text-sm text-red-400">{errorMessage}</p>

@@ -1,9 +1,14 @@
 {
   "pages": {
-    "/page": [
+    "/app/sermons/[id]/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/page.js"
+      "static/chunks/app/app/sermons/[id]/page.js"
+    ],
+    "/app/sermons/[id]/error": [
+      "static/chunks/webpack.js",
+      "static/chunks/main-app.js",
+      "static/chunks/app/app/sermons/[id]/error.js"
     ],
     "/layout": [
       "static/chunks/webpack.js",
@@ -16,15 +21,10 @@
       "static/chunks/main-app.js",
       "static/chunks/app/error.js"
     ],
-    "/sermons/[id]/page": [
+    "/app/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/sermons/[id]/page.js"
-    ],
-    "/sermons/[id]/error": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/sermons/[id]/error.js"
+      "static/chunks/app/app/page.js"
     ]
   }
 }
