@@ -29,6 +29,7 @@ class SermonPayload(StrictBaseModel):
     series: Optional[str] = None
     sermon_date: Optional[date] = None
     tags: Optional[list[str]] = None
+    language: Optional[str] = None
 
     @field_validator("sermon_date", mode="before")
     @classmethod
@@ -82,8 +83,10 @@ class SermonRead(ORMModel):
     series: Optional[str] = None
     sermon_date: Optional[date] = None
     tags: Optional[list[str]] = None
+    language: Optional[str] = None
     source_url: Optional[str]
     source_download_url: Optional[str] = None
+    video_duration_sec: Optional[float] = None
     progress: int
     status: SermonStatus
     error_message: Optional[str] = None

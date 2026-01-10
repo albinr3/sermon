@@ -25,6 +25,7 @@ export const sermonSchema = z.object({
   series: z.string().nullable().optional(),
   sermon_date: z.string().nullable().optional(),
   tags: z.array(z.string()).nullable().optional(),
+  language: z.string().nullable().optional(),
   source_url: z.string().nullable(),
   source_download_url: z.string().nullable().optional(),
   progress: z.number(),

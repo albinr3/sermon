@@ -1,50 +1,390 @@
 ===================================
-2026-01-09T20:22:28 SERMON 17 - TOKEN USAGE REPORT
+2026-01-10T00:26:45 SERMON 19 - TOKEN USAGE REPORT
 Method: full-context
-Prompt tokens: 3682
-Output tokens: 627
-Total tokens: 4309
+Prompt tokens: 3950
+Output tokens: 1094
+Total tokens: 5044
+Cache hit tokens: 0
+Cache miss tokens: 3950
+Cost: $0.000859
+===================================
+===================================
+2026-01-10T00:26:45 SERMON 19 - TOKEN USAGE REPORT
+Method: selection
+Prompt tokens: 15955
+Output tokens: 511
+Total tokens: 16466
+Cache hit tokens: 128
+Cache miss tokens: 15827
+Cost: $0.002377
+===================================
+-----------------------------------
+2026-01-10T00:26:45 CLIP 24 TOKENS
+Sermon: 19
+Method: full-context
+Prompt tokens: 1317
+Output tokens: 365
+Total tokens: 1681
+Cache hit tokens: 0
+Cache miss tokens: 1317
+-----------------------------------
+-----------------------------------
+2026-01-10T00:26:45 CLIP 25 TOKENS
+Sermon: 19
+Method: full-context
+Prompt tokens: 1317
+Output tokens: 365
+Total tokens: 1681
+Cache hit tokens: 0
+Cache miss tokens: 1317
+-----------------------------------
+-----------------------------------
+2026-01-10T00:26:45 CLIP 26 TOKENS
+Sermon: 19
+Method: full-context
+Prompt tokens: 1317
+Output tokens: 365
+Total tokens: 1681
+Cache hit tokens: 0
+Cache miss tokens: 1317
+-----------------------------------
+-----------------------------------
+2026-01-10T00:26:45 CLIP 27 TOKENS
+Sermon: 19
+Method: selection
+Prompt tokens: 7978
+Output tokens: 256
+Total tokens: 8233
 Cache hit tokens: 64
-Cache miss tokens: 3618
-Cost: $0.000691
-===================================
-===================================
-2026-01-09T20:22:28 SERMON 17 - TOKEN USAGE REPORT
+Cache miss tokens: 7914
+-----------------------------------
+-----------------------------------
+2026-01-10T00:26:45 CLIP 28 TOKENS
+Sermon: 19
 Method: selection
-Prompt tokens: 25086
-Output tokens: 436
-Total tokens: 25522
-Cache hit tokens: 128
-Cache miss tokens: 24958
-Cost: $0.003634
+Prompt tokens: 7978
+Output tokens: 256
+Total tokens: 8233
+Cache hit tokens: 64
+Cache miss tokens: 7914
+-----------------------------------
+===================================
+2026-01-10T00:40:43 SERMON 20 - TOKEN USAGE REPORT
+Method: full-context
+Prompt tokens: 22949
+Output tokens: 1835
+Total tokens: 24784
+Cache hit tokens: 384
+Cache miss tokens: 22565
+Cost: $0.003727
 ===================================
 -----------------------------------
-2026-01-09T20:22:28 CLIP 216 TOKENS
-Sermon: 17
+2026-01-10T00:40:43 CLIP 29 TOKENS
+Sermon: 20
 Method: full-context
-Prompt tokens: 1841
-Output tokens: 314
-Total tokens: 2154
-Cache hit tokens: 32
-Cache miss tokens: 1809
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
 -----------------------------------
 -----------------------------------
-2026-01-09T20:22:28 CLIP 217 TOKENS
-Sermon: 17
+2026-01-10T00:40:43 CLIP 30 TOKENS
+Sermon: 20
 Method: full-context
-Prompt tokens: 1841
-Output tokens: 314
-Total tokens: 2154
-Cache hit tokens: 32
-Cache miss tokens: 1809
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
 -----------------------------------
 -----------------------------------
-2026-01-09T20:22:28 CLIP 218 TOKENS
-Sermon: 17
-Method: selection
-Prompt tokens: 25086
-Output tokens: 436
-Total tokens: 25522
-Cache hit tokens: 128
-Cache miss tokens: 24958
+2026-01-10T00:40:43 CLIP 31 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 32 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 33 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 34 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 35 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 36 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 37 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 38 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 39 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 40 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 41 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 42 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+-----------------------------------
+2026-01-10T00:40:43 CLIP 43 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1530
+Output tokens: 122
+Total tokens: 1652
+Cache hit tokens: 26
+Cache miss tokens: 1504
+-----------------------------------
+===================================
+2026-01-10T01:51:25 SERMON 20 - TOKEN USAGE REPORT
+Method: full-context
+Prompt tokens: 21019
+Output tokens: 4700
+Total tokens: 25719
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+Cost: $0.004259
+===================================
+-----------------------------------
+2026-01-10T01:51:25 CLIP 59 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 60 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 61 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 62 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 63 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 64 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 65 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 66 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 67 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 68 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 69 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 70 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 71 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 72 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
+-----------------------------------
+-----------------------------------
+2026-01-10T01:51:26 CLIP 73 TOKENS
+Sermon: 20
+Method: full-context
+Prompt tokens: 1401
+Output tokens: 313
+Total tokens: 1715
+Cache hit tokens: n/a
+Cache miss tokens: n/a
 -----------------------------------

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_model: str | None = None
     deepseek_base_url: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str | None = None
+    openai_base_url: str | None = None
     celery_default_priority: int = 5
     celery_priority_transcribe: int = 7
     celery_priority_suggest: int = 5

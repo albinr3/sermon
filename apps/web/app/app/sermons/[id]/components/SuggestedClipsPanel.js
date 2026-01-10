@@ -5,6 +5,8 @@ export default function SuggestedClipsPanel({
   onToggleUseLlm,
   llmMethod,
   onSelectLlmMethod,
+  llmProvider,
+  onSelectLlmProvider,
   onSuggest,
   onDeleteSuggestions,
   onToggleTokenStats,
@@ -38,19 +40,11 @@ export default function SuggestedClipsPanel({
       : 6;
   const progressDisplay = Math.round(progressValue);
   const progressLabel = suggestionsProgressLabel || "Estimated progress";
-  const scoringStats = tokenStats?.methods?.scoring || null;
-  const selectionStats = tokenStats?.methods?.selection || null;
-  const generationStats = tokenStats?.methods?.generation || null;
   const fullContextStats = tokenStats?.methods?.["full-context"] || null;
-  const comparison = tokenStats?.comparison || null;
   const formatCost = (value) =>
     typeof value === "number" && Number.isFinite(value)
       ? value.toFixed(6)
       : "0.000000";
-  const comparisonLabel =
-    comparison?.base_method && comparison?.compare_method
-      ? `${comparison.base_method} vs ${comparison.compare_method}`
-      : "Delta";
 
   return (
     <section className="surface-card">
@@ -71,57 +65,51 @@ export default function SuggestedClipsPanel({
               />
               Usar IA para sugerir clips
             </label>
-            <div className="flex flex-col gap-1 text-xs text-[color:var(--muted)]">
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="llm-method"
-                  value="scoring"
-                  checked={llmMethod === "scoring"}
-                  onChange={() => onSelectLlmMethod("scoring")}
-                  disabled={!useLlmSuggestions || suggesting}
-                  className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                />
-                Metodo Actual (Scoring) - ~7,500 tokens, $0.001
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="llm-method"
-                  value="selection"
-                  checked={llmMethod === "selection"}
-                  onChange={() => onSelectLlmMethod("selection")}
-                  disabled={!useLlmSuggestions || suggesting}
-                  className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                />
-                Metodo Mejorado (Selection) - ~25,000 tokens, $0.004
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="llm-method"
-                  value="generation"
-                  checked={llmMethod === "generation"}
-                  onChange={() => onSelectLlmMethod("generation")}
-                  disabled={!useLlmSuggestions || suggesting}
-                  className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                />
-                Metodo Premium (Generation) - ~50,000 tokens, $0.006-0.008
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="llm-method"
-                  value="full-context"
-                  checked={llmMethod === "full-context"}
-                  onChange={() => onSelectLlmMethod("full-context")}
-                  disabled={!useLlmSuggestions || suggesting}
-                  className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                />
-                Full Context - ~60K tokens, $0.012, 120s - Maxima calidad
-              </label>
-            </div>
-            {llmMethod === "full-context" ? (
+            {useLlmSuggestions ? (
+              <div className="flex flex-col gap-1 text-xs text-[color:var(--muted)]">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    value="deepseek"
+                    checked={llmProvider === "deepseek"}
+                    onChange={() => onSelectLlmProvider("deepseek")}
+                    disabled={suggesting}
+                    className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
+                  />
+                  DeepSeek
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    value="openai"
+                    checked={llmProvider === "openai"}
+                    onChange={() => onSelectLlmProvider("openai")}
+                    disabled={suggesting}
+                    className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
+                  />
+                  OpenAI GPT-5 mini
+                </label>
+              </div>
+            ) : null}
+            {useLlmSuggestions ? (
+              <div className="flex flex-col gap-1 text-xs text-[color:var(--muted)]">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="llm-method"
+                    value="full-context"
+                    checked={llmMethod === "full-context"}
+                    onChange={() => onSelectLlmMethod("full-context")}
+                    disabled={suggesting}
+                    className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
+                  />
+                  Full Context - ~60K tokens, $0.012, 120s - Maxima calidad
+                </label>
+              </div>
+            ) : null}
+            {useLlmSuggestions && llmMethod === "full-context" ? (
               <div className="text-xs text-[#7a4a12]">
                 Warning: ~60K tokens, hasta $0.012 por sermon.
               </div>
@@ -181,63 +169,17 @@ export default function SuggestedClipsPanel({
               </div>
             ) : tokenStatsError ? (
               <p className="text-[#a33a2b]">{tokenStatsError}</p>
-            ) : scoringStats || selectionStats ? (
+            ) : fullContextStats ? (
               <div className="space-y-2">
-                {scoringStats ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>
-                      Scoring: {scoringStats.total_tokens || 0} tokens · output{" "}
-                      {scoringStats.output_tokens || 0} · cache hit{" "}
-                      {scoringStats.cache_hit_tokens || 0} · miss{" "}
-                      {scoringStats.cache_miss_tokens || 0}
-                    </span>
-                    <span>${formatCost(scoringStats.estimated_cost_usd)} USD</span>
-                  </div>
-                ) : null}
-                {selectionStats ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>
-                      Selection: {selectionStats.total_tokens || 0} tokens · output{" "}
-                      {selectionStats.output_tokens || 0} · cache hit{" "}
-                      {selectionStats.cache_hit_tokens || 0} · miss{" "}
-                      {selectionStats.cache_miss_tokens || 0}
-                    </span>
-                    <span>${formatCost(selectionStats.estimated_cost_usd)} USD</span>
-                  </div>
-                ) : null}
-                {generationStats ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>
-                      Generation: {generationStats.total_tokens || 0} tokens ·
-                      output {generationStats.output_tokens || 0} · cache hit{" "}
-                      {generationStats.cache_hit_tokens || 0} · miss{" "}
-                      {generationStats.cache_miss_tokens || 0}
-                    </span>
-                    <span>${formatCost(generationStats.estimated_cost_usd)} USD</span>
-                  </div>
-                ) : null}
-                {fullContextStats ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>
-                      Full Context: {fullContextStats.total_tokens || 0} tokens ·
-                      output {fullContextStats.output_tokens || 0} · cache hit{" "}
-                      {fullContextStats.cache_hit_tokens || 0} · miss{" "}
-                      {fullContextStats.cache_miss_tokens || 0}
-                    </span>
-                    <span>${formatCost(fullContextStats.estimated_cost_usd)} USD</span>
-                  </div>
-                ) : null}
-                {comparison ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>
-                      {comparisonLabel}: {comparison.token_delta} tokens
-                      {typeof comparison.token_pct_increase === "number"
-                        ? ` (${comparison.token_pct_increase.toFixed(1)}%)`
-                        : ""}
-                    </span>
-                    <span>${formatCost(comparison.cost_delta_usd)} USD</span>
-                  </div>
-                ) : null}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span>
+                    Full Context: {fullContextStats.total_tokens || 0} tokens ú
+                    output {fullContextStats.output_tokens || 0} ú cache hit{" "}
+                    {fullContextStats.cache_hit_tokens || 0} ú miss{" "}
+                    {fullContextStats.cache_miss_tokens || 0}
+                  </span>
+                  <span>${formatCost(fullContextStats.estimated_cost_usd)} USD</span>
+                </div>
               </div>
             ) : (
               <p>No token stats available yet.</p>

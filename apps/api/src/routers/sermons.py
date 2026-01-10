@@ -50,6 +50,7 @@ def create_sermon(
         series=payload.series,
         sermon_date=payload.sermon_date,
         tags=payload.tags,
+        language=payload.language,
         progress=0,
     )
     session.add(sermon)
@@ -276,6 +277,61 @@ def upload_complete(
 
 
 @router.post(
+    "/{sermon_id}/retry-transcription",
+    response_model=UploadCompleteResponse,
+    status_code=status.HTTP_200_OK,
+)
+def retry_transcription(
+    sermon_id: int,
+    session: Session = Depends(get_session),
+) -> UploadCompleteResponse:
+    """Reintenta transcripcion de un sermon que fallo o esta incompleto."""
+    sermon = session.get(Sermon, sermon_id)
+    if not sermon or sermon.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Sermon not found")
+
+    if not sermon.source_url:
+        raise HTTPException(status_code=400, detail="Missing source URL")
+
+    logger.info("Retrying transcription for sermon %s", sermon_id)
+
+    now = datetime.utcnow()
+    session.execute(
+        update(TranscriptSegment)
+        .where(
+            TranscriptSegment.sermon_id == sermon_id,
+            TranscriptSegment.deleted_at.is_(None),
+        )
+        .values(deleted_at=now, updated_at=now)
+    )
+    session.execute(
+        update(TranscriptEmbedding)
+        .where(
+            TranscriptEmbedding.sermon_id == sermon_id,
+            TranscriptEmbedding.deleted_at.is_(None),
+        )
+        .values(deleted_at=now, updated_at=now)
+    )
+
+    sermon.status = SermonStatus.uploaded
+    sermon.progress = 5
+    sermon.error_message = None
+    session.commit()
+    session.refresh(sermon)
+
+    try:
+        celery_app.send_task(
+            "worker.transcribe_sermon",
+            args=[sermon.id],
+            priority=settings.celery_priority_transcribe,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to enqueue") from exc
+
+    return UploadCompleteResponse(sermon=sermon)
+
+
+@router.post(
     "/{sermon_id}/embed",
     response_model=EmbedResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -312,6 +368,9 @@ def suggest_clips(
     llm_method: str = Query(
         "scoring", regex="^(scoring|selection|generation|full-context)$"
     ),
+    llm_provider: str = Query(
+        "deepseek", regex="^(deepseek|openai)$"
+    ),
     session: Session = Depends(get_session),
 ) -> SuggestClipsResponse:
     """Enqueue clip suggestions using LLM scoring or LLM selection."""
@@ -326,7 +385,7 @@ def suggest_clips(
         celery_app.send_task(
             "worker.suggest_clips",
             args=[sermon.id],
-            kwargs={"use_llm": use_llm_effective, "llm_method": llm_method},
+            kwargs={"use_llm": use_llm_effective, "llm_method": llm_method, "llm_provider": llm_provider},
             priority=settings.celery_priority_suggest,
         )
     except Exception as exc:

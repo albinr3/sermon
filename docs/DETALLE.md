@@ -52,8 +52,8 @@ Flujo de sugerencias:
 1) La UI llama `POST /sermons/{id}/suggest?use_llm=true|false`.
 2) La API encola `worker.suggest_clips(sermon_id, use_llm)`.
 3) Heuristica: combina segmentos para clips de 30s a 120s, prioriza inicios y finales limpios (silencios/puntuacion) y descarta texto vacio.
-4) Si `use_llm` es true y Deepseek esta configurado, re-scorea candidatos y puede sugerir recortes (`trim_suggestion`). Score final: 0.3 heuristica + 0.7 LLM.
-5) Si Deepseek falla o no esta configurado, se hace fallback a heuristica.
+4) Si `use_llm` es true y el proveedor seleccionado (Deepseek o OpenAI) esta configurado, re-scorea candidatos y puede sugerir recortes (`trim_suggestion`). Score final: 0.3 heuristica + 0.7 LLM. El usuario puede elegir el proveedor desde la UI.
+5) Si el proveedor falla o no esta configurado, se hace fallback a heuristica.
 6) Se deduplica por solapamiento (>60%).
 7) Se guardan en `clips` con `source=auto`, `score`, `rationale` y `use_llm`.
 
@@ -128,6 +128,7 @@ Variables clave:
 - `NEXT_PUBLIC_API_URL`
 - `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`
+- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` (ej: `OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_MODEL=gpt-5-mini`)
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`)
 
 ## Notas de UX

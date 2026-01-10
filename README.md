@@ -23,6 +23,7 @@ Configura el archivo `.env` en la raiz. Variables clave:
 - `NEXT_PUBLIC_POLL_INTERVAL_MS` (default `5000`)
 - `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`
+- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` (ej: `OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_MODEL=gpt-5-mini`)
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`, solo UI)
 - `CELERY_*` (concurrency por queue, retries y prioridades)
 
@@ -93,11 +94,13 @@ Flower: http://localhost:5555 (opcional)
 - Las URLs firmadas (presigned PUT/GET) de MinIO expiran a los 3600s (1h).
 - La UI valida el tamano maximo de archivo con `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB`.
 
-## LLM para sugerencias (Deepseek)
-- El worker reordena candidatos con Deepseek cuando `use_llm` es true.
+## LLM para sugerencias (Deepseek / OpenAI)
+- El worker reordena candidatos con Deepseek o OpenAI cuando `use_llm` es true.
+- El usuario puede seleccionar el proveedor (Deepseek o OpenAI GPT-5 mini) desde la UI.
 - Si falta config o hay error, cae a heuristica sin romper el flujo.
 - Puede devolver `trim_suggestion` (recorte sugerido) que se guarda en el clip.
 - Las sugerencias guardan `use_llm` para mostrar un badge IA en la UI.
+- Ambos proveedores usan la misma estructura de prompts y logs.
 
 ## Actualizaciones recientes
 - Sugerencias con dedupe por solapamiento y por semantica (si hay embeddings).

@@ -73,15 +73,21 @@ export async function listSermons({ limit, offset, q, status, tag } = {}) {
   return apiFetch(`/sermons/${query ? `?${query}` : ""}`, {}, sermonListSchema);
 }
 
-export async function createSermon(filename) {
+export async function createSermon(filename, language) {
   return apiFetch("/sermons/", {
     method: "POST",
-    body: JSON.stringify({ filename })
+    body: JSON.stringify({ filename, language })
   }, createSermonResponseSchema);
 }
 
 export async function markUploadComplete(id) {
   return apiFetch(`/sermons/${id}/upload-complete`, {
+    method: "POST"
+  }, uploadCompleteResponseSchema);
+}
+
+export async function retryTranscription(sermonId) {
+  return apiFetch(`/sermons/${sermonId}/retry-transcription`, {
     method: "POST"
   }, uploadCompleteResponseSchema);
 }
@@ -138,13 +144,16 @@ export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   }, clipSchema);
 }
 
-export async function suggestClips(id, useLlm, llmMethod = "scoring") {
+export async function suggestClips(id, useLlm, llmMethod = "full-context", llmProvider = "deepseek") {
   const params = new URLSearchParams();
   if (typeof useLlm === "boolean") {
     params.set("use_llm", String(useLlm));
   }
   if (llmMethod) {
     params.set("llm_method", llmMethod);
+  }
+  if (llmProvider) {
+    params.set("llm_provider", llmProvider);
   }
   const query = params.toString();
   return apiFetch(`/sermons/${id}/suggest${query ? `?${query}` : ""}`, {

@@ -26,6 +26,7 @@ import {
   listClips,
   listSuggestions,
   recordClipFeedback,
+  retryTranscription,
   renderClip,
   searchSermon,
   suggestClips,
@@ -179,7 +180,8 @@ export default function SermonDetail({ params }) {
   const [useLlmSuggestions, setUseLlmSuggestions] = useState(
     process.env.NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS === "true"
   );
-  const [llmMethod, setLlmMethod] = useState("scoring");
+  const [llmMethod, setLlmMethod] = useState("full-context");
+  const [llmProvider, setLlmProvider] = useState("deepseek");
   const [actionLoading, setActionLoading] = useState({});
   const [editingSuggestion, setEditingSuggestion] = useState(null);
   const [suggestionClipMap, setSuggestionClipMap] = useState({});
@@ -207,6 +209,8 @@ export default function SermonDetail({ params }) {
   const [tokenStatsOpen, setTokenStatsOpen] = useState(false);
   const [tokenStatsLoading, setTokenStatsLoading] = useState(false);
   const [tokenStatsError, setTokenStatsError] = useState("");
+  const [showErrorAlert, setShowErrorAlert] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const pushNotice = (message, tone = "info") => {
     setNotice({ message, tone });
@@ -225,7 +229,8 @@ export default function SermonDetail({ params }) {
     setSuggestionsProgress(0);
     setPreviewClip(null);
     setIsTranscriptOpen(false);
-    setLlmMethod("scoring");
+    setLlmMethod("full-context");
+    setLlmProvider("deepseek");
     setMetadataDraft({
       title: "",
       description: "",
@@ -241,6 +246,8 @@ export default function SermonDetail({ params }) {
     setTokenStatsOpen(false);
     setTokenStatsLoading(false);
     setTokenStatsError("");
+    setShowErrorAlert(false);
+    setIsRetrying(false);
   }, [sermonId]);
 
   useEffect(() => {
@@ -309,6 +316,12 @@ export default function SermonDetail({ params }) {
       tags: Array.isArray(sermon.tags) ? sermon.tags.join(", ") : ""
     });
   }, [sermon, metadataDirty]);
+
+  useEffect(() => {
+    if (sermon?.status === "error" && sermon?.error_message) {
+      setShowErrorAlert(true);
+    }
+  }, [sermon?.status, sermon?.error_message]);
 
   const shouldLoadSegments =
     Boolean(sermon) &&
@@ -701,6 +714,25 @@ export default function SermonDetail({ params }) {
     deleteMutation.mutate();
   };
 
+  const handleRetryTranscription = async () => {
+    if (!sermon || isRetrying) {
+      return;
+    }
+    setIsRetrying(true);
+    try {
+      await retryTranscription(sermon.id);
+      setShowErrorAlert(false);
+      pushNotice("Reintentando transcripcion...", "success");
+      await queryClient.invalidateQueries({ queryKey: ["sermon", sermonId] });
+      await queryClient.invalidateQueries({ queryKey: ["segments", sermonId] });
+      await queryClient.invalidateQueries({ queryKey: ["suggestions", sermonId] });
+    } catch (err) {
+      pushNotice("Error al reintentar la transcripcion.", "error");
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
   const requestEmbeddings = async () => {
     if (embeddingLoading || sermon?.status === "embedded") {
       return;
@@ -728,7 +760,7 @@ export default function SermonDetail({ params }) {
       : "";
 
   const suggestMutation = useMutation({
-    mutationFn: () => suggestClips(sermonId, useLlmSuggestions, llmMethod),
+    mutationFn: () => suggestClips(sermonId, useLlmSuggestions, llmMethod, llmProvider),
     onMutate: () => {
       setSuggestionsPending(true);
       setSuggestionsError("");
@@ -986,6 +1018,39 @@ export default function SermonDetail({ params }) {
             >
               Dismiss
             </button>
+          </div>
+        </div>
+      ) : null}
+
+      {showErrorAlert && sermon?.status === "error" ? (
+        <div className="rounded-2xl border border-[#e6b1aa] bg-[#fbe2e0] px-4 py-4 text-sm text-[#8c2f26]">
+          <div className="flex flex-wrap items-start gap-4">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#f3c6c2] text-base">
+              !
+            </div>
+            <div className="min-w-[240px] flex-1">
+              <p className="text-sm font-semibold">Error en transcripcion</p>
+              <p className="mt-1 text-sm text-[#8c2f26]/80">
+                {sermon?.error_message || "La transcripcion no se completo."}
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleRetryTranscription}
+                  disabled={isRetrying}
+                  className="btn btn-outline border-[#d4574a] text-[#8c2f26] hover:bg-[#f3c6c2] disabled:opacity-50"
+                >
+                  {isRetrying ? "Reintentando..." : "Reintentar transcripcion"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowErrorAlert(false)}
+                  className="text-xs uppercase tracking-wide text-[#8c2f26]/70 hover:text-[#8c2f26]"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       ) : null}
@@ -1472,6 +1537,8 @@ export default function SermonDetail({ params }) {
         onToggleUseLlm={setUseLlmSuggestions}
         llmMethod={llmMethod}
         onSelectLlmMethod={setLlmMethod}
+        llmProvider={llmProvider}
+        onSelectLlmProvider={setLlmProvider}
         onSuggest={handleSuggest}
         onDeleteSuggestions={handleDeleteSuggestions}
         onToggleTokenStats={handleToggleTokenStats}

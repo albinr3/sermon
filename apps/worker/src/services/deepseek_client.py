@@ -427,19 +427,38 @@ def generate_from_full_transcript(
 
     trimmed_text = _truncate_full_text(full_text)
     system_prompt = (
-        "Lee este sermon completo y genera 5-15 clips optimos "
-        "(entre MIN_SUGGESTIONS y MAX_SUGGESTIONS). Identifica momentos mas impactantes. "
-        "Devuelve SOLO JSON (sin markdown) como una lista de objetos con: "
-        "start_sec, end_sec, score (0-100), reason, theme."
+        "Eres un experto en crear clips virales de sermones para redes sociales.\n\n"
+        "TAREA: Lee este sermon COMPLETO y genera 10-20 clips optimos.\n\n"
+        "CRITERIOS DE SELECCION:\n"
+        "1. HOOK FUERTE (0-25 pts): Inicia con pregunta, declaracion impactante o estadistica\n"
+        "2. MENSAJE AUTONOMO (0-25 pts): Se entiende sin contexto previo, tiene conclusion clara\n"
+        "3. APLICABILIDAD (0-20 pts): Relevante para vida diaria, accionable\n"
+        "4. IMPACTO EMOCIONAL (0-20 pts): Inspira, conmueve, desafia o motiva\n"
+        "5. VIRALIDAD (0-10 pts): Potencial de ser compartido en redes sociales\n\n"
+        "REQUISITOS TECNICOS:\n"
+        "- Duracion ideal: 45-90 segundos (minimo 30s, maximo 120s)\n"
+        "- Inicio y fin en puntos naturales (no cortar palabras/frases)\n"
+        "- Variedad: Cubre diferentes temas del sermon\n"
+        "- Prioriza momentos con narrativa completa (inicio-desarrollo-conclusion)\n\n"
+        "EVITA:\n"
+        "- Clips que requieren contexto previo\n"
+        "- Momentos que terminan abruptamente\n"
+        "- Contenido exclusivamente doctrinal sin aplicacion\n"
+        "- Clips muy cortos (<30s) o muy largos (>120s)\n\n"
+        "FORMATO DE RESPUESTA (solo JSON, sin markdown):\n"
+        "[\n"
+        '  {"start_sec": numero, "end_sec": numero, "score": 0-100, "reason": "explicacion", "theme": "tema"}\n'
+        "]\n\n"
+        "Genera 10-20 clips que cumplan estos criterios."
     )
     user_prompt = (
-        "Metadata:\n"
-        f"Title: {title}\n"
-        f"Preacher: {preacher}\n"
-        f"Duration: {duration_label}\n\n"
-        "TRANSCRIPCION:\n"
+        f"SERMON COMPLETO:\n"
+        f"Titulo: {title}\n"
+        f"Predicador: {preacher}\n"
+        f"Duracion: {duration_label}\n\n"
+        f"TRANSCRIPCION CON TIMESTAMPS:\n"
         f"{trimmed_text}\n\n"
-        "Genera 5-15 clips con start_sec y end_sec exactos."
+        "Analiza todo el sermon y devuelve 10-20 clips en formato JSON."
     )
 
     payload = {

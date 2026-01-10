@@ -18,6 +18,11 @@ const MAX_UPLOAD_MB =
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 const uploadSchema = z.object({
+  language: z
+    .string()
+    .refine((value) => value === "es" || value === "en", {
+      message: "Select a language."
+    }),
   file: z
     .instanceof(File, { message: "Select a video file." })
     .refine((file) => file.size > 0, { message: "File is empty." })
@@ -39,13 +44,15 @@ export default function UploadSermon({ onUploaded }) {
     reset,
     formState: { errors }
   } = useForm({
-    resolver: zodResolver(uploadSchema)
+    resolver: zodResolver(uploadSchema),
+    defaultValues: { language: "" }
   });
   const { ref: fileRef, ...fileField } = register("file");
+  const languageField = register("language");
 
   const uploadMutation = useMutation({
-    mutationFn: async ({ file }) => {
-      const payload = await createSermon(file.name);
+    mutationFn: async ({ file, language }) => {
+      const payload = await createSermon(file.name, language);
       await uploadToPresignedUrl(payload.upload_url, file);
       await markUploadComplete(payload.sermon.id);
       return payload;
@@ -72,34 +79,48 @@ export default function UploadSermon({ onUploaded }) {
   };
 
   const errorMessage =
-    errors.file?.message || uploadMutation.error?.message || "";
+    errors.language?.message ||
+    errors.file?.message ||
+    uploadMutation.error?.message ||
+    "";
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="inline-flex items-center gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-2 text-sm font-semibold text-[color:var(--ink)] hover:border-[color:var(--accent)]">
-        <input
-          {...fileField}
-          ref={(node) => {
-            fileRef(node);
-            inputRef.current = node;
-          }}
-          type="file"
-          accept="video/*"
-          className="hidden"
-          onChange={handleFileChange}
+      <div className="flex flex-wrap items-center gap-3">
+        <select
+          {...languageField}
+          className="h-10 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 text-sm font-semibold text-[color:var(--ink)] focus:border-[color:var(--accent)]"
           disabled={uploadMutation.isPending}
-        />
-        <span className="inline-flex items-center gap-2">
-          {uploadMutation.isPending ? (
-            <>
-              <span className="h-3 w-3 animate-spin rounded-full border-2 border-[color:var(--line)] border-t-[color:var(--accent)]" />
-              Uploading...
-            </>
-          ) : (
-            "Upload sermon"
-          )}
-        </span>
-      </label>
+        >
+          <option value="">Select language</option>
+          <option value="es">Espanol</option>
+          <option value="en">Ingles</option>
+        </select>
+        <label className="inline-flex items-center gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-2 text-sm font-semibold text-[color:var(--ink)] hover:border-[color:var(--accent)]">
+          <input
+            {...fileField}
+            ref={(node) => {
+              fileRef(node);
+              inputRef.current = node;
+            }}
+            type="file"
+            accept="video/*"
+            className="hidden"
+            onChange={handleFileChange}
+            disabled={uploadMutation.isPending}
+          />
+          <span className="inline-flex items-center gap-2">
+            {uploadMutation.isPending ? (
+              <>
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-[color:var(--line)] border-t-[color:var(--accent)]" />
+                Uploading...
+              </>
+            ) : (
+              "Upload sermon"
+            )}
+          </span>
+        </label>
+      </div>
       <p className="text-xs text-[color:var(--muted)]">
         Max size {MAX_UPLOAD_MB} MB.
       </p>

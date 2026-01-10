@@ -51,6 +51,7 @@ class Sermon(Base):
     series: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sermon_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )

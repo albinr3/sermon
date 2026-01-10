@@ -40,10 +40,17 @@ from src.reframe import (
 )
 from src.services.deepseek_client import (
     DeepseekClientError,
-    generate_from_full_transcript,
-    score_clip_candidates,
-    select_best_clips,
-    generate_clip_suggestions,
+    generate_from_full_transcript as deepseek_generate_from_full_transcript,
+    score_clip_candidates as deepseek_score_clip_candidates,
+    select_best_clips as deepseek_select_best_clips,
+    generate_clip_suggestions as deepseek_generate_clip_suggestions,
+)
+from src.services.openai_client import (
+    OpenAIClientError,
+    generate_from_full_transcript as openai_generate_from_full_transcript,
+    score_clip_candidates as openai_score_clip_candidates,
+    select_best_clips as openai_select_best_clips,
+    generate_clip_suggestions as openai_generate_clip_suggestions,
 )
 from src.storage import download_object, upload_object
 
@@ -572,7 +579,9 @@ def _scale_heuristic_scores(candidates: list[dict]) -> None:
         )
 
 
-def _score_candidates_with_llm(candidates: list[dict]) -> dict | None:
+def _score_candidates_with_llm(
+    candidates: list[dict], *, llm_provider: str = "deepseek"
+) -> dict | None:
     llm_payload = []
     for index, candidate in enumerate(candidates, start=1):
         candidate_id = f"c{index}"
@@ -589,11 +598,26 @@ def _score_candidates_with_llm(candidates: list[dict]) -> dict | None:
             }
         )
 
-    response = score_clip_candidates(
+    if llm_provider == "openai":
+        api_key = settings.openai_api_key
+        base_url = settings.openai_base_url
+        model = settings.openai_model
+        score_fn = openai_score_clip_candidates
+        error_class = OpenAIClientError
+        provider_name = "OpenAI"
+    else:
+        api_key = settings.deepseek_api_key
+        base_url = settings.deepseek_base_url
+        model = settings.deepseek_model
+        score_fn = deepseek_score_clip_candidates
+        error_class = DeepseekClientError
+        provider_name = "Deepseek"
+
+    response = score_fn(
         llm_payload,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
         timeout=LLM_TIMEOUT_SEC,
     )
     results = response.get("clips") or []
@@ -601,7 +625,7 @@ def _score_candidates_with_llm(candidates: list[dict]) -> dict | None:
     result_map = {item["id"]: item for item in results}
 
     if len(result_map) != len(llm_payload):
-        raise DeepseekClientError("Deepseek returned incomplete scores")
+        raise error_class(f"{provider_name} returned incomplete scores")
 
     for candidate in candidates:
         scored = result_map.get(candidate["candidate_id"])
@@ -617,6 +641,7 @@ def _select_candidates_with_llm(
     sermon_context: str,
     *,
     target_count: int = 10,
+    llm_provider: str = "deepseek",
 ) -> tuple[list[dict], dict | None]:
     llm_payload = []
     for index, candidate in enumerate(candidates, start=1):
@@ -624,12 +649,27 @@ def _select_candidates_with_llm(
         candidate["candidate_id"] = candidate_id
         llm_payload.append({"id": candidate_id, "text": candidate["text"]})
 
-    response = select_best_clips(
+    if llm_provider == "openai":
+        api_key = settings.openai_api_key
+        base_url = settings.openai_base_url
+        model = settings.openai_model
+        select_fn = openai_select_best_clips
+        error_class = OpenAIClientError
+        provider_name = "OpenAI"
+    else:
+        api_key = settings.deepseek_api_key
+        base_url = settings.deepseek_base_url
+        model = settings.deepseek_model
+        select_fn = deepseek_select_best_clips
+        error_class = DeepseekClientError
+        provider_name = "Deepseek"
+
+    response = select_fn(
         llm_payload,
         sermon_context,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
         target_count=target_count,
         timeout=LLM_TIMEOUT_SEC,
     )
@@ -637,7 +677,7 @@ def _select_candidates_with_llm(
     token_usage = response.get("token_usage")
     result_map = {item["id"]: item for item in results}
     if not result_map:
-        raise DeepseekClientError("Deepseek returned no selections")
+        raise error_class(f"{provider_name} returned no selections")
 
     selected: list[dict] = []
     for candidate in candidates:
@@ -940,6 +980,8 @@ def _backfill_with_selection(
     pool: list[dict],
     sermon_context: str,
     target_count: int,
+    *,
+    llm_provider: str = "deepseek",
 ) -> tuple[list[dict], dict | None]:
     if len(selected) >= target_count:
         return selected, None
@@ -951,9 +993,9 @@ def _backfill_with_selection(
     llm_candidates = llm_candidates[:LLM_SELECTION_CANDIDATES]
     try:
         candidates, token_usage = _select_candidates_with_llm(
-            llm_candidates, sermon_context, target_count=target_count
+            llm_candidates, sermon_context, target_count=target_count, llm_provider=llm_provider
         )
-    except DeepseekClientError as exc:
+    except (DeepseekClientError, OpenAIClientError) as exc:
         logger.warning("Selection backfill failed: %s", exc)
         return selected, None
     if not candidates:
@@ -1111,6 +1153,35 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
 
             download_object(sermon.source_url, mp4_path)
 
+            # Obtener duración del video con ffprobe
+            try:
+                result = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "default=noprint_wrappers=1:nokey=1",
+                        mp4_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                video_duration = float(result.stdout.strip())
+                sermon.video_duration_sec = video_duration
+                session.commit()
+                logger.info(
+                    "Video duration for sermon %s: %.1fs",
+                    sermon_id,
+                    video_duration,
+                )
+            except Exception as exc:
+                logger.warning("Failed to get video duration: %s", exc)
+                video_duration = None
+
             subprocess.run(
                 [
                     "ffmpeg",
@@ -1129,7 +1200,11 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
             )
 
             model = WhisperModel("tiny", device="cpu", compute_type="int8")
-            segments, info = model.transcribe(wav_path)
+            language = (sermon.language or "").strip().lower()
+            transcribe_kwargs = {}
+            if language:
+                transcribe_kwargs["language"] = language
+            segments, info = model.transcribe(wav_path, **transcribe_kwargs)
             total_duration = getattr(info, "duration", None)
             if total_duration is None and isinstance(info, dict):
                 total_duration = info.get("duration")
@@ -1168,15 +1243,78 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
 
             session.commit()
 
+        transcription_ok = True
+        error_details: list[str] = []
+
+        if sermon.video_duration_sec and count > 0:
+            last_segment = session.execute(
+                select(TranscriptSegment)
+                .where(
+                    TranscriptSegment.sermon_id == sermon_id,
+                    TranscriptSegment.deleted_at.is_(None),
+                )
+                .order_by(TranscriptSegment.end_ms.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+            if last_segment:
+                transcribed_duration_sec = last_segment.end_ms / 1000.0
+                expected_duration_sec = sermon.video_duration_sec
+                if expected_duration_sec > 0:
+                    coverage_percent = (
+                        transcribed_duration_sec / expected_duration_sec
+                    ) * 100
+                    logger.info(
+                        "Sermon %s coverage: %.1f%% (%.1fs / %.1fs)",
+                        sermon_id,
+                        coverage_percent,
+                        transcribed_duration_sec,
+                        expected_duration_sec,
+                    )
+                    if coverage_percent < 95:
+                        transcription_ok = False
+                        missing_seconds = expected_duration_sec - transcribed_duration_sec
+                        error_details.append(
+                            "Transcripcion incompleta: {coverage:.1f}% (faltan {missing:.1f} segundos)".format(
+                                coverage=coverage_percent,
+                                missing=missing_seconds,
+                            )
+                        )
+
+            expected_segments = int(sermon.video_duration_sec / 3)
+            if expected_segments > 0 and count < expected_segments * 0.7:
+                transcription_ok = False
+                error_details.append(
+                    "Muy pocos segmentos: {count} de ~{expected} esperados".format(
+                        count=count,
+                        expected=expected_segments,
+                    )
+                )
+
         session.refresh(sermon)
         if sermon.deleted_at is not None:
             logger.info("Sermon %s deleted during transcription", sermon_id)
             return {"sermon_id": sermon_id, "status": "deleted"}
-        sermon.status = SermonStatus.transcribed
-        sermon.progress = 100
-        sermon.error_message = None
+
+        if transcription_ok:
+            sermon.status = SermonStatus.transcribed
+            sermon.progress = 100
+            sermon.error_message = None
+            logger.info(
+                "Sermon %s transcribed successfully: %s segments", sermon_id, count
+            )
+        else:
+            sermon.status = SermonStatus.error
+            sermon.progress = 50
+            sermon.error_message = " | ".join(error_details)
+            logger.error("Sermon %s incomplete: %s", sermon_id, sermon.error_message)
+
         session.commit()
-        return {"sermon_id": sermon.id, "segments": count}
+        return {
+            "sermon_id": sermon.id,
+            "segments": count,
+            "complete": transcription_ok,
+        }
     except Exception as exc:
         session.rollback()
         _maybe_retry(self, exc, label=f"Transcribe sermon {sermon_id}")
@@ -1200,6 +1338,7 @@ def suggest_clips(
     sermon_id: int,
     use_llm: bool | None = None,
     llm_method: str = "scoring",
+    llm_provider: str = "deepseek",
 ) -> dict:
     session = SessionLocal()
     sermon = None
@@ -1262,283 +1401,120 @@ def suggest_clips(
         use_llm_effective = (
             settings.use_llm_for_clip_suggestions if use_llm is None else use_llm
         )
+        llm_provider_effective = llm_provider if llm_provider in ("deepseek", "openai") else "deepseek"
         llm_used = False
         token_usage = None
         token_usage_by_method: dict[str, dict] = {}
-        llm_method_effective = (llm_method or "scoring").strip().lower()
-        if llm_method_effective not in (
-            "scoring",
-            "selection",
-            "generation",
-            "full-context",
-        ):
-            llm_method_effective = "scoring"
+        llm_method_effective = llm_method if llm_method in ("scoring", "selection", "generation", "full-context") else "full-context"
 
-        if use_llm_effective:
-            if llm_method_effective == "full-context":
-                full_text = "\n".join(
-                    f"[{segment.start_ms / 1000:.1f}s] {segment.text}"
-                    for segment in segments
-                    if segment.text
+        if use_llm_effective and llm_method_effective == "full-context":
+            full_text = "\n".join(
+                f"[{segment.start_ms / 1000:.1f}s] {segment.text}"
+                for segment in segments
+                if segment.text
+            )
+            metadata = {
+                "title": sermon.title,
+                "preacher": sermon.preacher,
+                "duration_sec": segments[-1].end_ms / 1000.0,
+            }
+            try:
+                if llm_provider_effective == "openai":
+                    generate_fn = openai_generate_from_full_transcript
+                    api_key = settings.openai_api_key
+                    base_url = settings.openai_base_url
+                    model = settings.openai_model
+                    error_class = OpenAIClientError
+                    provider_name = "OpenAI"
+                else:
+                    generate_fn = deepseek_generate_from_full_transcript
+                    api_key = settings.deepseek_api_key
+                    base_url = settings.deepseek_base_url
+                    model = settings.deepseek_model
+                    error_class = DeepseekClientError
+                    provider_name = "Deepseek"
+
+                response = generate_fn(
+                    full_text,
+                    metadata,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    timeout=120.0,
                 )
-                metadata = {
-                    "title": sermon.title,
-                    "preacher": sermon.preacher,
-                    "duration_sec": segments[-1].end_ms / 1000.0,
-                }
-                try:
-                    response = generate_from_full_transcript(
-                        full_text,
-                        metadata,
-                        api_key=settings.deepseek_api_key,
-                        base_url=settings.deepseek_base_url,
-                        model=settings.deepseek_model,
-                        timeout=120.0,
+                token_usage = response.get("token_usage")
+                if token_usage:
+                    token_usage_by_method["full-context"] = _merge_token_usage(
+                        token_usage_by_method.get("full-context"),
+                        token_usage,
                     )
-                    token_usage = response.get("token_usage")
-                    if token_usage:
-                        token_usage_by_method["full-context"] = _merge_token_usage(
-                            token_usage_by_method.get("full-context"),
-                            token_usage,
-                        )
-                    suggestions = response.get("clips") or []
-                    candidates = []
-                    for suggestion in suggestions:
-                        start_sec = suggestion.get("start_sec")
-                        end_sec = suggestion.get("end_sec")
-                        try:
-                            start_ms = int(round(float(start_sec) * 1000))
-                            end_ms = int(round(float(end_sec) * 1000))
-                        except (TypeError, ValueError):
-                            continue
-                        start_ms, end_ms = _adjust_to_segment_boundaries(
-                            segments, start_ms, end_ms
-                        )
-                        duration_ms = end_ms - start_ms
-                        if duration_ms < MIN_CLIP_MS or duration_ms > MAX_CLIP_MS:
-                            continue
-                        text = _build_text_for_range(segments, start_ms, end_ms)
-                        if not text:
-                            continue
-                        reason = suggestion.get("reason") or ""
-                        theme = suggestion.get("theme") or ""
-                        rationale = (
-                            f"{reason} (theme: {theme})" if theme else str(reason)
-                        )
-                        candidates.append(
-                            {
-                                "start_ms": start_ms,
-                                "end_ms": end_ms,
-                                "text": text,
-                                "llm_score": suggestion.get("score"),
-                                "llm_reason": rationale,
-                                "llm_method": "full-context",
-                            }
-                        )
-                    if not candidates:
-                        raise DeepseekClientError(
-                            "Deepseek returned no usable full-context clips"
-                        )
-                    llm_used = True
-                except DeepseekClientError as exc:
-                    logger.warning(
-                        "Deepseek full-context unavailable, falling back to selection: %s",
-                        exc,
-                    )
-                    llm_method_effective = "selection"
-                    llm_candidates = sorted(
-                        all_candidates,
-                        key=lambda item: item["heuristic_score"],
-                        reverse=True,
-                    )
-                    llm_candidates = llm_candidates[:LLM_SELECTION_CANDIDATES]
+                suggestions = response.get("clips") or []
+                candidates = []
+                for suggestion in suggestions:
+                    start_sec = suggestion.get("start_sec")
+                    end_sec = suggestion.get("end_sec")
                     try:
-                        sermon_context = _build_sermon_context(
-                            segments, limit_chars=2000
-                        )
-                        candidates, token_usage = _select_candidates_with_llm(
-                            llm_candidates, sermon_context, target_count=10
-                        )
-                        if token_usage:
-                            token_usage_by_method["selection"] = _merge_token_usage(
-                                token_usage_by_method.get("selection"),
-                                token_usage,
-                            )
-                        llm_used = True
-                    except DeepseekClientError as exc_selection:
-                        logger.warning(
-                            "Deepseek selection unavailable, falling back to heuristics: %s",
-                            exc_selection,
-                        )
-                        candidates = all_candidates
-                        llm_used = False
-                        token_usage = None
-            elif llm_method_effective == "generation":
-                windows = _create_sliding_windows(
-                    segments, MIN_CLIP_MS, MAX_CLIP_MS, step_ms=15_000
+                        start_ms = int(round(float(start_sec) * 1000))
+                        end_ms = int(round(float(end_sec) * 1000))
+                    except (TypeError, ValueError):
+                        continue
+                    start_ms, end_ms = _adjust_to_segment_boundaries(
+                        segments, start_ms, end_ms
+                    )
+                    duration_ms = end_ms - start_ms
+                    if duration_ms < MIN_CLIP_MS or duration_ms > MAX_CLIP_MS:
+                        continue
+                    text = _build_text_for_range(segments, start_ms, end_ms)
+                    if not text:
+                        continue
+                    reason = suggestion.get("reason") or ""
+                    theme = suggestion.get("theme") or ""
+                    rationale = (
+                        f"{reason} (theme: {theme})" if theme else str(reason)
+                    )
+                    candidates.append(
+                        {
+                            "start_ms": start_ms,
+                            "end_ms": end_ms,
+                            "text": text,
+                            "llm_score": suggestion.get("score"),
+                            "llm_reason": rationale,
+                            "llm_method": "full-context",
+                        }
+                    )
+                if not candidates:
+                    raise error_class(
+                        f"{provider_name} returned no usable full-context clips"
+                    )
+                llm_used = True
+            except (DeepseekClientError, OpenAIClientError) as exc:
+                logger.warning(
+                    "%s full-context unavailable, falling back to heuristics: %s",
+                    provider_name if llm_provider_effective == "openai" else "Deepseek",
+                    exc,
                 )
-                sermon_intro = " ".join(
-                    segment.text for segment in segments[:100] if segment.text
-                )[:3000]
-                sermon_context = {"title": sermon.title, "intro": sermon_intro}
-                window_map = {window["id"]: window for window in windows}
-                try:
-                    if not windows:
-                        raise DeepseekClientError("No windows available for generation")
-                    response = generate_clip_suggestions(
-                        windows,
-                        sermon_context,
-                        api_key=settings.deepseek_api_key,
-                        base_url=settings.deepseek_base_url,
-                        model=settings.deepseek_model,
-                        timeout=LLM_TIMEOUT_SEC,
-                    )
-                    token_usage = response.get("token_usage")
-                    if token_usage:
-                        token_usage_by_method["generation"] = _merge_token_usage(
-                            token_usage_by_method.get("generation"),
-                            token_usage,
-                        )
-                    suggestions = response.get("clips") or []
-                    candidates = []
-                    for suggestion in suggestions:
-                        window_id = suggestion.get("window_id")
-                        window = window_map.get(window_id)
-                        if not window:
-                            continue
-                        start_ms = window["start_ms"]
-                        end_ms = window["end_ms"]
-                        timing = suggestion.get("timing_adjustment")
-                        if isinstance(timing, dict):
-                            try:
-                                confidence = float(timing.get("confidence") or 0.0)
-                            except (TypeError, ValueError):
-                                confidence = 0.0
-                            if confidence >= 0.7:
-                                try:
-                                    start_offset_sec = float(
-                                        timing.get("start_offset_sec") or 0.0
-                                    )
-                                    end_offset_sec = float(
-                                        timing.get("end_offset_sec") or 0.0
-                                    )
-                                except (TypeError, ValueError):
-                                    start_offset_sec = 0.0
-                                    end_offset_sec = 0.0
-                                adjusted_start = start_ms + int(
-                                    round(max(0.0, start_offset_sec) * 1000)
-                                )
-                                adjusted_end = end_ms - int(
-                                    round(abs(end_offset_sec) * 1000)
-                                )
-                                if adjusted_end > adjusted_start:
-                                    start_ms, end_ms = adjusted_start, adjusted_end
-                        start_ms, end_ms = _adjust_to_segment_boundaries(
-                            segments, start_ms, end_ms
-                        )
-                        duration_ms = end_ms - start_ms
-                        if duration_ms < MIN_CLIP_MS or duration_ms > MAX_CLIP_MS:
-                            continue
-                        text = _build_text_for_range(segments, start_ms, end_ms)
-                        if not text:
-                            text = window["text"]
-                        reason = suggestion.get("reason") or ""
-                        theme = suggestion.get("theme") or ""
-                        rationale = (
-                            f"{reason} (theme: {theme})" if theme else str(reason)
-                        )
-                        candidates.append(
-                            {
-                                "start_ms": start_ms,
-                                "end_ms": end_ms,
-                                "text": text,
-                                "llm_score": suggestion.get("score"),
-                                "llm_reason": rationale,
-                            }
-                        )
-                    if not candidates:
-                        raise DeepseekClientError(
-                            "Deepseek returned no usable generation clips"
-                        )
-                    llm_used = True
-                except DeepseekClientError as exc:
-                    logger.warning(
-                        "Deepseek generation unavailable, falling back to selection: %s",
-                        exc,
-                    )
-                    llm_method_effective = "selection"
-                    llm_candidates = sorted(
-                        all_candidates,
-                        key=lambda item: item["heuristic_score"],
-                        reverse=True,
-                    )
-                    llm_candidates = llm_candidates[:LLM_SELECTION_CANDIDATES]
-                    try:
-                        sermon_context = _build_sermon_context(
-                            segments, limit_chars=2000
-                        )
-                        candidates, token_usage = _select_candidates_with_llm(
-                            llm_candidates, sermon_context, target_count=10
-                        )
-                        llm_used = True
-                    except DeepseekClientError as exc_selection:
-                        logger.warning(
-                            "Deepseek selection unavailable, falling back to heuristics: %s",
-                            exc_selection,
-                        )
-                        candidates = all_candidates
-                        llm_used = False
-                        token_usage = None
-            elif llm_method_effective == "selection":
-                llm_candidates = sorted(
-                    all_candidates,
-                    key=lambda item: item["heuristic_score"],
-                    reverse=True,
-                )
-                llm_candidates = llm_candidates[:LLM_SELECTION_CANDIDATES]
-                sermon_context = _build_sermon_context(segments, limit_chars=2000)
-                try:
-                    candidates, token_usage = _select_candidates_with_llm(
-                        llm_candidates, sermon_context, target_count=10
-                    )
-                    if not candidates:
-                        raise DeepseekClientError("Deepseek returned no selections")
-                    if token_usage:
-                        token_usage_by_method["selection"] = _merge_token_usage(
-                            token_usage_by_method.get("selection"),
-                            token_usage,
-                        )
-                    llm_used = True
-                except DeepseekClientError as exc:
-                    logger.warning(
-                        "Deepseek LLM unavailable, falling back to heuristics: %s",
-                        exc,
-                    )
-                    candidates = all_candidates
-            else:
-                llm_candidates = sorted(
-                    all_candidates,
-                    key=lambda item: item["heuristic_score"],
-                    reverse=True,
-                )
-                llm_candidates = llm_candidates[:LLM_MAX_CANDIDATES]
-                try:
-                    token_usage = _score_candidates_with_llm(llm_candidates)
-                    if token_usage:
-                        token_usage_by_method["scoring"] = _merge_token_usage(
-                            token_usage_by_method.get("scoring"),
-                            token_usage,
-                        )
-                    llm_used = True
-                    candidates = llm_candidates
-                except DeepseekClientError as exc:
-                    logger.warning(
-                        "Deepseek LLM unavailable, falling back to heuristics: %s",
-                        exc,
-                    )
-                    candidates = all_candidates
+                candidates = all_candidates
+                llm_used = False
+                token_usage = None
         else:
             candidates = all_candidates
+
+        if use_llm_effective and llm_method_effective == "scoring" and not llm_used:
+            try:
+                token_usage_scoring = _score_candidates_with_llm(
+                    candidates, llm_provider=llm_provider_effective
+                )
+                if token_usage_scoring:
+                    token_usage_by_method["scoring"] = _merge_token_usage(
+                        token_usage_by_method.get("scoring"),
+                        token_usage_scoring,
+                    )
+                    token_usage = _merge_token_usage(token_usage, token_usage_scoring)
+                llm_used = True
+            except (DeepseekClientError, OpenAIClientError) as exc:
+                logger.warning("Scoring failed, falling back to heuristics: %s", exc)
+                llm_used = False
+                token_usage = None
 
         if llm_used:
             if llm_method_effective == "scoring":
@@ -1589,13 +1565,14 @@ def suggest_clips(
         candidates.sort(key=lambda item: item["score"], reverse=True)
         candidates = _semantic_dedupe_candidates(candidates)
         if len(candidates) < MIN_SUGGESTIONS:
-            if llm_method_effective == "full-context" and llm_used:
+            if llm_used and use_llm_effective:
                 sermon_context = _build_sermon_context(segments, limit_chars=2000)
                 candidates, selection_usage = _backfill_with_selection(
                     candidates,
                     all_candidates,
                     sermon_context,
                     MIN_SUGGESTIONS,
+                    llm_provider=llm_provider_effective,
                 )
                 if selection_usage:
                     token_usage_by_method["selection"] = _merge_token_usage(
