@@ -72,40 +72,83 @@ API: http://localhost:8000
 Flower: http://localhost:5555 (opcional)
 
 ## Endpoints principales
-- `GET /health`
-- `POST /sermons`
-- `GET /sermons`
-- `GET /sermons/{id}`
-- `POST /sermons/{id}/upload-complete`
-- `POST /sermons/{id}/suggest` (query opcional `use_llm=true|false`)
-- `GET /sermons/{id}/suggestions`
-- `POST /sermons/{id}/embed`
-- `GET /sermons/{id}/search?q=...&k=...`
-- `GET /sermons/{id}/segments`
-- `POST /clips`
-- `GET /clips`
-- `GET /clips/{id}`
-- `POST /clips/{id}/accept`
-- `POST /clips/{id}/feedback`
-- `POST /clips/{id}/apply-trim`
-- `POST /clips/{id}/render?type=preview|final`
+
+### Sermons
+- `GET /health` - Verifica salud del sistema (DB, Redis, MinIO)
+- `POST /sermons` - Crea un sermon y retorna URL de carga
+- `GET /sermons` - Lista sermones con filtros (status, tag, búsqueda)
+- `GET /sermons/{id}` - Obtiene detalle de un sermon
+- `PATCH /sermons/{id}` - Actualiza metadatos de un sermon
+- `DELETE /sermons/{id}` - Soft delete de un sermon (y clips/segmentos asociados)
+- `POST /sermons/{id}/upload-complete` - Marca subida completa y encola transcripción
+- `POST /sermons/{id}/retry-transcription` - Reintenta transcripción fallida
+- `GET /sermons/{id}/segments` - Lista segmentos de transcripción
+- `GET /sermons/{id}/transcript-stats` - Estadísticas de transcripción (palabras, caracteres)
+- `POST /sermons/{id}/suggest` - Genera sugerencias de clips (query params: `use_llm`, `llm_method`, `llm_provider`)
+- `GET /sermons/{id}/suggestions` - Lista clips sugeridos con scores
+- `DELETE /sermons/{id}/suggestions` - Elimina todas las sugerencias de un sermon
+- `GET /sermons/{id}/token-stats` - Estadísticas de uso de tokens LLM por método
+- `POST /sermons/{id}/embed` - Genera embeddings semánticos
+- `GET /sermons/{id}/search?q=...&k=...` - Búsqueda semántica en transcripción
+
+### Clips
+- `POST /clips` - Crea un clip manual
+- `GET /clips` - Lista todos los clips (manuales y sugerencias)
+- `GET /clips/{id}` - Obtiene detalle de un clip
+- `PATCH /clips/{id}` - Actualiza un clip
+- `DELETE /clips/{id}` - Soft delete de un clip
+- `POST /clips/{id}/accept` - Acepta una sugerencia y crea clip manual
+- `POST /clips/{id}/feedback` - Envía feedback sobre una sugerencia
+- `POST /clips/{id}/apply-trim` - Aplica recorte sugerido por LLM
+- `POST /clips/{id}/render?type=preview|final` - Renderiza un clip (preview 540p o final 1080p)
 
 ## Notas
 - Las URLs firmadas (presigned PUT/GET) de MinIO expiran a los 3600s (1h).
 - La UI valida el tamano maximo de archivo con `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB`.
 
-## LLM para sugerencias (Deepseek / OpenAI)
-- El worker reordena candidatos con Deepseek o OpenAI cuando `use_llm` es true.
-- El usuario puede seleccionar el proveedor (Deepseek o OpenAI GPT-5 mini) desde la UI.
-- Si falta config o hay error, cae a heuristica sin romper el flujo.
-- Puede devolver `trim_suggestion` (recorte sugerido) que se guarda en el clip.
-- Las sugerencias guardan `use_llm` para mostrar un badge IA en la UI.
-- Ambos proveedores usan la misma estructura de prompts y logs.
+## LLM para sugerencias (4 métodos disponibles)
+El sistema ofrece múltiples métodos para generar sugerencias de clips con IA:
+
+### 1. **Scoring** (default)
+- Genera candidatos con heurísticas y los re-scorea con LLM
+- Combina score heurístico (0.3) + score LLM (0.7)
+- Más eficiente en tokens, ideal para refinamiento rápido
+
+### 2. **Selection**
+- El LLM selecciona los mejores clips desde candidatos heurísticos
+- Usa ventanas deslizantes para analizar contexto limitado
+- Puede sugerir recortes (`trim_suggestion`)
+- Balance entre calidad y costo
+
+### 3. **Generation**
+- El LLM genera clips desde cero usando la transcripción completa
+- No depende de heurísticas, máxima libertad creativa
+- Puede crear clips más originales pero usa más tokens
+
+### 4. **Full-context**
+- El LLM analiza la transcripción completa en una sola llamada
+- Máxima comprensión contextual, mejores decisiones
+- Más costoso en tokens pero mejor calidad
+- Ideal para sermones complejos o cuando la calidad es prioritaria
+
+### Características comunes
+- Soporta **Deepseek** y **OpenAI** (GPT-5 mini) como proveedores
+- Tracking de uso de tokens: prompt, completion, cache hits/misses
+- Estimación de costos por método
+- Estadísticas comparativas disponibles en `/sermons/{id}/token-stats`
+- Fallback automático a heurísticas si falla LLM
+- Dedupe por solapamiento (>60%) y semántico (si hay embeddings)
+- Las sugerencias muestran badge "IA" en la UI
 
 ## Actualizaciones recientes
-- Sugerencias con dedupe por solapamiento y por semantica (si hay embeddings).
-- Previews iniciales de sugerencias se encolan automaticamente y luego se completan en background.
-- Acciones nuevas sobre sugerencias: aceptar, enviar feedback y aplicar trim sugerido.
+- **4 métodos LLM**: scoring, selection, generation, full-context
+- **Tracking de tokens**: uso, cache, costos estimados por método
+- **Retry de transcripción**: reintentar transcripciones fallidas
+- **Estadísticas detalladas**: tokens, costos y comparativas entre métodos
+- **Sugerencias mejoradas**: dedupe semántico, clasificación por tipo de segmento
+- **Acciones sobre sugerencias**: aceptar, feedback, aplicar trim sugerido
+- **Soft delete en cascada**: eliminar sermon borra clips, segmentos y embeddings
+- **Templates**: plantillas de estilo para clips (fuentes, colores, posición)
 
 ## Alembic
 

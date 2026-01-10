@@ -71,18 +71,6 @@ export default function SuggestedClipsPanel({
                   <input
                     type="radio"
                     name="llm-provider"
-                    value="deepseek"
-                    checked={llmProvider === "deepseek"}
-                    onChange={() => onSelectLlmProvider("deepseek")}
-                    disabled={suggesting}
-                    className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                  />
-                  DeepSeek
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="llm-provider"
                     value="openai"
                     checked={llmProvider === "openai"}
                     onChange={() => onSelectLlmProvider("openai")}

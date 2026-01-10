@@ -144,7 +144,7 @@ export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   }, clipSchema);
 }
 
-export async function suggestClips(id, useLlm, llmMethod = "full-context", llmProvider = "deepseek") {
+export async function suggestClips(id, useLlm, llmMethod = "full-context", llmProvider = "openai") {
   const params = new URLSearchParams();
   if (typeof useLlm === "boolean") {
     params.set("use_llm", String(useLlm));

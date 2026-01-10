@@ -181,7 +181,7 @@ export default function SermonDetail({ params }) {
     process.env.NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS === "true"
   );
   const [llmMethod, setLlmMethod] = useState("full-context");
-  const [llmProvider, setLlmProvider] = useState("deepseek");
+  const [llmProvider, setLlmProvider] = useState("openai");
   const [actionLoading, setActionLoading] = useState({});
   const [editingSuggestion, setEditingSuggestion] = useState(null);
   const [suggestionClipMap, setSuggestionClipMap] = useState({});
@@ -230,7 +230,7 @@ export default function SermonDetail({ params }) {
     setPreviewClip(null);
     setIsTranscriptOpen(false);
     setLlmMethod("full-context");
-    setLlmProvider("deepseek");
+    setLlmProvider("openai");
     setMetadataDraft({
       title: "",
       description: "",

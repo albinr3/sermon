@@ -4,6 +4,17 @@ from typing import Any
 
 import requests
 
+from src.services.llm_prompts import (
+    full_context_system_prompt,
+    full_context_user_prompt,
+    scoring_system_prompt,
+    scoring_user_prompt,
+    selection_system_prompt,
+    selection_user_prompt,
+    windows_system_prompt,
+    windows_user_prompt,
+)
+
 logger = logging.getLogger(__name__)
 
 PROMPT_COST_PER_1M = 0.14
@@ -175,28 +186,8 @@ def score_clip_candidates(
         for item in candidates
     ]
 
-    # Adjust these prompts to tune the scoring behavior for your domain.
-    system_prompt = (
-        "Eres un experto en evaluar clips de sermones para redes sociales. "
-        "Criterios de evaluacion (0-100): "
-        "1. HOOK (0-25): captura atencion en los primeros segundos. "
-        "2. CLARIDAD (0-25): se entiende sin contexto previo. "
-        "3. APLICABILIDAD (0-25): relevante para la vida diaria. "
-        "4. EMOCION (0-25): genera respuesta emocional. "
-        "Prioriza clips que sean autonomos, con conclusion clara, "
-        "compartibles en redes sociales y conecten emocionalmente. "
-        "Devuelve SOLO JSON (sin markdown) como una lista de objetos con: "
-        "id, score (0-100), reason, y opcional trim_suggestion "
-        "(start_offset_sec, end_offset_sec, confidence). "
-        "Los offsets son segundos a recortar desde inicio y fin (>=0), "
-        "confidence es de 0 a 1. "
-        "Si sugieres recortes, mantenlos pequenos y evita cortar palabras."
-    )
-    user_prompt = (
-        "Candidates JSON:\n"
-        f"{json.dumps(prompt_candidates, ensure_ascii=True)}\n\n"
-        "Return a JSON array with one entry per candidate id."
-    )
+    system_prompt = scoring_system_prompt()
+    user_prompt = scoring_user_prompt(prompt_candidates)
 
     payload = {
         "model": model,
@@ -305,21 +296,10 @@ def select_best_clips(
     ]
     sermon_context = sermon_context or ""
 
-    system_prompt = (
-        "Eres un experto en identificar MEJORES momentos de sermones para redes sociales. "
-        "Selecciona los 10 MEJORES de estos candidatos basandote en: "
-        "1. IMPACTO EMOCIONAL, 2. MENSAJE COMPLETO, 3. AUTONOMIA, "
-        "4. VIRALIDAD, 5. VARIEDAD. "
-        "Devuelve SOLO JSON (sin markdown) como una lista de objetos con: "
-        "id, score (0-100), reason. "
-        "Devuelve exactamente {target_count} resultados si es posible."
-    ).format(target_count=target_count)
-    user_prompt = (
-        "Contexto del sermon (primeros 2000 chars):\n"
-        f"{sermon_context}\n\n"
-        "Candidates JSON:\n"
-        f"{json.dumps(prompt_candidates, ensure_ascii=True)}\n\n"
-        "Return a JSON array with one entry per selected candidate id."
+    system_prompt = selection_system_prompt(target_count=target_count)
+    user_prompt = selection_user_prompt(
+        sermon_context=sermon_context,
+        prompt_candidates=prompt_candidates,
     )
 
     payload = {
@@ -426,39 +406,12 @@ def generate_from_full_transcript(
             duration_label = ""
 
     trimmed_text = _truncate_full_text(full_text)
-    system_prompt = (
-        "Eres un experto en crear clips virales de sermones para redes sociales.\n\n"
-        "TAREA: Lee este sermon COMPLETO y genera 10-20 clips optimos.\n\n"
-        "CRITERIOS DE SELECCION:\n"
-        "1. HOOK FUERTE (0-25 pts): Inicia con pregunta, declaracion impactante o estadistica\n"
-        "2. MENSAJE AUTONOMO (0-25 pts): Se entiende sin contexto previo, tiene conclusion clara\n"
-        "3. APLICABILIDAD (0-20 pts): Relevante para vida diaria, accionable\n"
-        "4. IMPACTO EMOCIONAL (0-20 pts): Inspira, conmueve, desafia o motiva\n"
-        "5. VIRALIDAD (0-10 pts): Potencial de ser compartido en redes sociales\n\n"
-        "REQUISITOS TECNICOS:\n"
-        "- Duracion ideal: 45-90 segundos (minimo 30s, maximo 120s)\n"
-        "- Inicio y fin en puntos naturales (no cortar palabras/frases)\n"
-        "- Variedad: Cubre diferentes temas del sermon\n"
-        "- Prioriza momentos con narrativa completa (inicio-desarrollo-conclusion)\n\n"
-        "EVITA:\n"
-        "- Clips que requieren contexto previo\n"
-        "- Momentos que terminan abruptamente\n"
-        "- Contenido exclusivamente doctrinal sin aplicacion\n"
-        "- Clips muy cortos (<30s) o muy largos (>120s)\n\n"
-        "FORMATO DE RESPUESTA (solo JSON, sin markdown):\n"
-        "[\n"
-        '  {"start_sec": numero, "end_sec": numero, "score": 0-100, "reason": "explicacion", "theme": "tema"}\n'
-        "]\n\n"
-        "Genera 10-20 clips que cumplan estos criterios."
-    )
-    user_prompt = (
-        f"SERMON COMPLETO:\n"
-        f"Titulo: {title}\n"
-        f"Predicador: {preacher}\n"
-        f"Duracion: {duration_label}\n\n"
-        f"TRANSCRIPCION CON TIMESTAMPS:\n"
-        f"{trimmed_text}\n\n"
-        "Analiza todo el sermon y devuelve 10-20 clips en formato JSON."
+    system_prompt = full_context_system_prompt()
+    user_prompt = full_context_user_prompt(
+        title=title,
+        preacher=preacher,
+        duration_label=duration_label,
+        transcript=trimmed_text,
     )
 
     payload = {
@@ -575,20 +528,11 @@ def generate_clip_suggestions(
     sermon_title = str(sermon_context.get("title") or "")
     sermon_intro = str(sermon_context.get("intro") or "")
 
-    system_prompt = (
-        "Eres experto en clips virales. Analiza {count} ventanas y selecciona las "
-        "10-12 MEJORES basandote en: HOOK, MENSAJE AUTONOMO, IMPACTO EMOCIONAL, "
-        "APLICABILIDAD, VIRALIDAD. Devuelve SOLO JSON (sin markdown) como una lista "
-        "de objetos con: window_id, score (0-100), reason, theme, timing_adjustment "
-        "(start_offset_sec, end_offset_sec, confidence). Usa confidence 0-1."
-    ).format(count=len(prompt_windows))
-    user_prompt = (
-        "Sermon context:\n"
-        f"Title: {sermon_title}\n"
-        f"Intro: {sermon_intro}\n\n"
-        "Windows JSON:\n"
-        f"{json.dumps(prompt_windows, ensure_ascii=True)}\n\n"
-        "Selecciona las mejores."
+    system_prompt = windows_system_prompt(count=len(prompt_windows))
+    user_prompt = windows_user_prompt(
+        sermon_title=sermon_title,
+        sermon_intro=sermon_intro,
+        prompt_windows=prompt_windows,
     )
 
     payload = {
