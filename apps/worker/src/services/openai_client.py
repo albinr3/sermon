@@ -6,6 +6,8 @@ import requests
 
 from src.services.llm_prompts import (
     full_context_system_prompt,
+    full_context_system_prompt_v2,
+    full_context_system_prompt_v3,
     full_context_user_prompt,
     scoring_system_prompt,
     scoring_user_prompt,
@@ -150,16 +152,8 @@ def _format_usage_value(value: int | None) -> str:
 
 
 def _log_token_usage(label: str, token_usage: dict) -> None:
-    logger.info(
-        "%s tokens - prompt=%s output=%s total=%s cache_hit=%s cache_miss=%s cost_usd=%.6f",
-        label,
-        token_usage.get("prompt_tokens", 0),
-        token_usage.get("output_tokens", token_usage.get("completion_tokens", 0)),
-        token_usage.get("total_tokens", 0),
-        _format_usage_value(token_usage.get("cache_hit_tokens")),
-        _format_usage_value(token_usage.get("cache_miss_tokens")),
-        token_usage.get("estimated_cost_usd", 0.0),
-    )
+    # Logs de tokens deshabilitados
+    pass
 
 
 def score_clip_candidates(
@@ -385,6 +379,7 @@ def generate_from_full_transcript(
     base_url: str | None,
     model: str | None,
     timeout: float = 120.0,
+    prompt_version: str = "v1",
 ) -> dict:
     if not api_key or not api_key.strip():
         raise OpenAIClientError("OpenAI API key not configured")
@@ -404,7 +399,12 @@ def generate_from_full_transcript(
             duration_label = ""
 
     trimmed_text = _truncate_full_text(full_text)
-    system_prompt = full_context_system_prompt()
+    if prompt_version == "v3":
+        system_prompt = full_context_system_prompt_v3()
+    elif prompt_version == "v2":
+        system_prompt = full_context_system_prompt_v2()
+    else:
+        system_prompt = full_context_system_prompt()
     user_prompt = full_context_user_prompt(
         title=title,
         preacher=preacher,
@@ -420,20 +420,41 @@ def generate_from_full_transcript(
         ],
     }
 
+    # Calcular timeout dinámico basado en el tamaño del payload
+    # Base: 120s, +60s por cada 10,000 caracteres adicionales, máximo 600s (10 min)
+    payload_size_chars = len(trimmed_text) + len(system_prompt)
+    dynamic_timeout = 120.0 + (payload_size_chars / 10000.0) * 60.0
+    dynamic_timeout = min(max(dynamic_timeout, timeout), 600.0)  # Clamp entre timeout y 600s
+    
+    logger.info(
+        "OpenAI full-context timeout calculation: payload_size_chars=%d, base_timeout=%.1f, dynamic_timeout=%.1f",
+        payload_size_chars, timeout, dynamic_timeout
+    )
+
     endpoint = _resolve_endpoint(base_url)
     try:
         response = requests.post(
             endpoint,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
-            timeout=timeout,
+            timeout=dynamic_timeout,
         )
     except requests.RequestException as exc:
-        raise OpenAIClientError("OpenAI request failed") from exc
+        # Log detallado del error para debugging
+        error_type = type(exc).__name__
+        error_msg = str(exc)
+        is_timeout = isinstance(exc, requests.Timeout)
+        is_connection = isinstance(exc, requests.ConnectionError)
+        logger.error(
+            "OpenAI request failed (generate_from_full_transcript): type=%s, message=%s, is_timeout=%s, is_connection=%s, endpoint=%s, timeout_used=%.1f, payload_size_chars=%d",
+            error_type, error_msg, is_timeout, is_connection, endpoint, dynamic_timeout, payload_size_chars
+        )
+        raise OpenAIClientError(f"OpenAI request failed: {error_type}: {error_msg}") from exc
 
     if response.status_code >= 300:
-        logger.warning(
-            "OpenAI HTTP error %s: %s", response.status_code, response.text[:500]
+        logger.error(
+            "OpenAI HTTP error (generate_from_full_transcript): status=%s, response=%s", 
+            response.status_code, response.text[:1000]
         )
         raise OpenAIClientError(f"OpenAI HTTP error {response.status_code}")
 
@@ -457,18 +478,74 @@ def generate_from_full_transcript(
         raise OpenAIClientError("OpenAI JSON must be a list")
 
     results: list[dict] = []
+    skipped_count = 0
     for index, item in enumerate(parsed):
         if not isinstance(item, dict):
+            skipped_count += 1
+            logger.debug("OpenAI item %d skipped: not a dict, type=%s", index, type(item).__name__)
             continue
+        
+        # v3 usa start_u/end_u (utterance IDs)
+        if prompt_version == "v3":
+            start_u = item.get("start_u")
+            end_u = item.get("end_u")
+            try:
+                start_u_val = int(start_u) if start_u is not None else None
+                end_u_val = int(end_u) if end_u is not None else None
+                if start_u_val is not None and end_u_val is not None:
+                    if end_u_val <= start_u_val:
+                        skipped_count += 1
+                        logger.debug("OpenAI item %d skipped: end_u (%d) <= start_u (%d)", index, end_u_val, start_u_val)
+                        continue
+            except (TypeError, ValueError) as exc:
+                start_u_val = None
+                end_u_val = None
+                skipped_count += 1
+                logger.debug("OpenAI item %d skipped: invalid start_u/end_u: %s", index, exc)
+            
+            score = item.get("score")
+            score_val = None
+            if score is not None:
+                try:
+                    score_val = float(score)
+                except (TypeError, ValueError):
+                    score_val = None
+            if score_val is None:
+                score_val = float(max(0, 100 - index))
+            reason = str(item.get("reason") or "").strip()
+            theme = str(item.get("theme") or "").strip()
+            
+            result_item = {
+                "score": max(0.0, min(100.0, score_val)),
+                "reason": reason,
+                "theme": theme,
+            }
+            if start_u_val is not None and end_u_val is not None:
+                result_item["start_u"] = start_u_val
+                result_item["end_u"] = end_u_val
+                logger.debug("OpenAI item %d (v3): start_u=%d, end_u=%d, score=%.1f", index, start_u_val, end_u_val, result_item["score"])
+            else:
+                logger.warning("OpenAI item %d skipped (v3): missing start_u or end_u (start_u=%s, end_u=%s, item_keys=%s)", 
+                             index, start_u, end_u, list(item.keys()))
+                continue
+            results.append(result_item)
+            continue
+        
+        # v1/v2: start_sec/end_sec o quote_start/quote_end
         start_sec = item.get("start_sec")
         end_sec = item.get("end_sec")
+        quote_start = item.get("quote_start")
+        quote_end = item.get("quote_end")
         try:
-            start_sec_val = float(start_sec)
-            end_sec_val = float(end_sec)
+            start_sec_val = None
+            end_sec_val = None
+            if start_sec is not None and end_sec is not None:
+                start_sec_val = float(start_sec)
+                end_sec_val = float(end_sec)
+                if end_sec_val <= start_sec_val:
+                    continue
         except (TypeError, ValueError):
-            continue
-        if end_sec_val <= start_sec_val:
-            continue
+            pass
         score = item.get("score")
         score_val = None
         if score is not None:
@@ -480,19 +557,27 @@ def generate_from_full_transcript(
             score_val = float(max(0, 100 - index))
         reason = str(item.get("reason") or "").strip()
         theme = str(item.get("theme") or "").strip()
-        results.append(
-            {
-                "start_sec": start_sec_val,
-                "end_sec": end_sec_val,
-                "score": max(0.0, min(100.0, score_val)),
-                "reason": reason,
-                "theme": theme,
-            }
-        )
+        quote_start_str = str(quote_start).strip() if quote_start is not None else None
+        quote_end_str = str(quote_end).strip() if quote_end is not None else None
+        result_item = {
+            "score": max(0.0, min(100.0, score_val)),
+            "reason": reason,
+            "theme": theme,
+        }
+        if start_sec_val is not None and end_sec_val is not None:
+            result_item["start_sec"] = start_sec_val
+            result_item["end_sec"] = end_sec_val
+        if quote_start_str:
+            result_item["quote_start"] = quote_start_str
+        if quote_end_str:
+            result_item["quote_end"] = quote_end_str
+        results.append(result_item)
 
     if not results:
+        logger.error("OpenAI returned no usable clips (generate_from_full_transcript): parsed_len=%d, skipped=%d, results_len=0, prompt_version=%s", len(parsed), skipped_count, prompt_version)
         raise OpenAIClientError("OpenAI returned no usable clips")
 
+    logger.info("OpenAI full-context (generate_from_full_transcript): parsed %d items, returned %d usable clips", len(parsed), len(results))
     _log_token_usage("OpenAI full-context", token_usage)
     return {"clips": results, "token_usage": token_usage}
 

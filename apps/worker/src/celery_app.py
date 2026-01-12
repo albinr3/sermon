@@ -34,6 +34,7 @@ celery_app.conf.update(
         "sep": ":",
         "queue_order_strategy": "priority",
     },
+    broker_connection_retry_on_startup=True,
 )
 
 celery_app.autodiscover_tasks(["src.tasks"])

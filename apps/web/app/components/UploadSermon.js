@@ -23,6 +23,11 @@ const uploadSchema = z.object({
     .refine((value) => value === "es" || value === "en", {
       message: "Select a language."
     }),
+  transcription_model: z
+    .string()
+    .refine((value) => value === "faster_whisper" || value === "assemblyai", {
+      message: "Select a transcription model."
+    }),
   file: z
     .instanceof(File, { message: "Select a video file." })
     .refine((file) => file.size > 0, { message: "File is empty." })
@@ -45,14 +50,15 @@ export default function UploadSermon({ onUploaded }) {
     formState: { errors }
   } = useForm({
     resolver: zodResolver(uploadSchema),
-    defaultValues: { language: "" }
+    defaultValues: { language: "", transcription_model: "faster_whisper" }
   });
   const { ref: fileRef, ...fileField } = register("file");
   const languageField = register("language");
+  const transcriptionModelField = register("transcription_model");
 
   const uploadMutation = useMutation({
-    mutationFn: async ({ file, language }) => {
-      const payload = await createSermon(file.name, language);
+    mutationFn: async ({ file, language, transcription_model }) => {
+      const payload = await createSermon(file.name, language, transcription_model);
       await uploadToPresignedUrl(payload.upload_url, file);
       await markUploadComplete(payload.sermon.id);
       return payload;
@@ -80,6 +86,7 @@ export default function UploadSermon({ onUploaded }) {
 
   const errorMessage =
     errors.language?.message ||
+    errors.transcription_model?.message ||
     errors.file?.message ||
     uploadMutation.error?.message ||
     "";
@@ -95,6 +102,14 @@ export default function UploadSermon({ onUploaded }) {
           <option value="">Select language</option>
           <option value="es">Espanol</option>
           <option value="en">Ingles</option>
+        </select>
+        <select
+          {...transcriptionModelField}
+          className="h-10 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-3 text-sm font-semibold text-[color:var(--ink)] focus:border-[color:var(--accent)]"
+          disabled={uploadMutation.isPending}
+        >
+          <option value="faster_whisper">Faster Whisper</option>
+          <option value="assemblyai">AssemblyAI</option>
         </select>
         <label className="inline-flex items-center gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] px-4 py-2 text-sm font-semibold text-[color:var(--ink)] hover:border-[color:var(--accent)]">
           <input

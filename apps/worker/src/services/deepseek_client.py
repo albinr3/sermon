@@ -6,6 +6,8 @@ import requests
 
 from src.services.llm_prompts import (
     full_context_system_prompt,
+    full_context_system_prompt_v2,
+    full_context_system_prompt_v3,
     full_context_user_prompt,
     scoring_system_prompt,
     scoring_user_prompt,
@@ -387,6 +389,7 @@ def generate_from_full_transcript(
     base_url: str | None,
     model: str | None,
     timeout: float = 120.0,
+    prompt_version: str = "v1",
 ) -> dict:
     if not api_key or not api_key.strip():
         raise DeepseekClientError("Deepseek API key not configured")
@@ -406,7 +409,12 @@ def generate_from_full_transcript(
             duration_label = ""
 
     trimmed_text = _truncate_full_text(full_text)
-    system_prompt = full_context_system_prompt()
+    if prompt_version == "v3":
+        system_prompt = full_context_system_prompt_v3()
+    elif prompt_version == "v2":
+        system_prompt = full_context_system_prompt_v2()
+    else:
+        system_prompt = full_context_system_prompt()
     user_prompt = full_context_user_prompt(
         title=title,
         preacher=preacher,
@@ -463,6 +471,45 @@ def generate_from_full_transcript(
     for index, item in enumerate(parsed):
         if not isinstance(item, dict):
             continue
+        
+        # v3 usa start_u/end_u (utterance IDs)
+        if prompt_version == "v3":
+            start_u = item.get("start_u")
+            end_u = item.get("end_u")
+            try:
+                start_u_val = int(start_u) if start_u is not None else None
+                end_u_val = int(end_u) if end_u is not None else None
+                if start_u_val is not None and end_u_val is not None:
+                    if end_u_val <= start_u_val:
+                        continue
+            except (TypeError, ValueError):
+                start_u_val = None
+                end_u_val = None
+            
+            score = item.get("score")
+            score_val = None
+            if score is not None:
+                try:
+                    score_val = float(score)
+                except (TypeError, ValueError):
+                    score_val = None
+            if score_val is None:
+                score_val = float(max(0, 100 - index))
+            reason = str(item.get("reason") or "").strip()
+            theme = str(item.get("theme") or "").strip()
+            
+            result_item = {
+                "score": max(0.0, min(100.0, score_val)),
+                "reason": reason,
+                "theme": theme,
+            }
+            if start_u_val is not None and end_u_val is not None:
+                result_item["start_u"] = start_u_val
+                result_item["end_u"] = end_u_val
+            results.append(result_item)
+            continue
+        
+        # v1/v2: start_sec/end_sec
         start_sec = item.get("start_sec")
         end_sec = item.get("end_sec")
         try:

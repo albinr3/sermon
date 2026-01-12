@@ -31,10 +31,11 @@ def ensure_bucket_exists() -> None:
 def create_presigned_put_url(
     object_name: str, content_type: str | None, expires_in: int
 ) -> str:
-    endpoint_url = settings.s3_public_endpoint or settings.s3_endpoint
+    # PUT URLs siempre usan el endpoint local - el navegador sube directamente a MinIO local
+    # s3_public_endpoint solo se usa para GET URLs cuando AssemblyAI necesita acceso desde internet
     client = boto3.client(
         "s3",
-        endpoint_url=endpoint_url,
+        endpoint_url=settings.s3_endpoint,
         aws_access_key_id=settings.s3_access_key,
         aws_secret_access_key=settings.s3_secret_key,
         region_name=settings.s3_region,
@@ -52,8 +53,10 @@ def create_presigned_put_url(
     )
 
 
-def create_presigned_get_url(object_name: str, expires_in: int) -> str:
-    endpoint_url = settings.s3_public_endpoint or settings.s3_endpoint
+def create_presigned_get_url(object_name: str, expires_in: int, use_public_endpoint: bool = False) -> str:
+    # Por defecto usa endpoint local (para clips, previews, etc.)
+    # use_public_endpoint=True solo para casos especiales como AssemblyAI que necesita acceso desde internet
+    endpoint_url = settings.s3_public_endpoint if use_public_endpoint and settings.s3_public_endpoint else settings.s3_endpoint
     client = boto3.client(
         "s3",
         endpoint_url=endpoint_url,

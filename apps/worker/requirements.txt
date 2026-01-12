@@ -3,6 +3,7 @@ flower==2.0.1
 redis==5.0.8
 pydantic-settings==2.5.2
 faster-whisper==1.0.3
+assemblyai==0.32.0
 boto3==1.35.10
 sqlalchemy==2.0.34
 psycopg2-binary==2.9.9

@@ -1,8 +1,10 @@
 import os
 import random
 import re
+import string
 import subprocess
 import tempfile
+import time
 import unicodedata
 from datetime import datetime
 from uuid import uuid4
@@ -10,6 +12,7 @@ from uuid import uuid4
 from celery.utils.log import get_task_logger
 from botocore.exceptions import BotoCoreError, ClientError
 from faster_whisper import WhisperModel
+import assemblyai as aai
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import func, or_, select, update
@@ -21,7 +24,6 @@ from src.config import settings
 from src.db import SessionLocal
 from src.models import (
     Clip,
-    ClipReframeMode,
     ClipRenderType,
     ClipSource,
     ClipStatus,
@@ -30,13 +32,7 @@ from src.models import (
     Template,
     TranscriptEmbedding,
     TranscriptSegment,
-)
-from src.reframe import (
-    build_segment_centers,
-    compute_crop_x,
-    compute_scaled_dims,
-    detect_face_track,
-    get_video_metadata,
+    TranscriptUtterance,
 )
 from src.services.deepseek_client import (
     DeepseekClientError,
@@ -52,7 +48,13 @@ from src.services.openai_client import (
     select_best_clips as openai_select_best_clips,
     generate_clip_suggestions as openai_generate_clip_suggestions,
 )
-from src.storage import download_object, upload_object
+from src.services.llm_prompts import (
+    full_context_system_prompt,
+    full_context_system_prompt_v2,
+    full_context_system_prompt_v3,
+    full_context_user_prompt,
+)
+from src.storage import download_object, upload_object, create_presigned_get_url
 
 logger = get_task_logger(__name__)
 
@@ -209,6 +211,381 @@ def _normalize_text(text: str) -> str:
         char for char in normalized if not unicodedata.combining(char)
     )
     return stripped.lower()
+
+
+def _normalize_text_for_search(text: str) -> str:
+    """Normaliza texto para búsqueda flexible: minúsculas, sin puntuación simple."""
+    normalized = _normalize_text(text)
+    # Remover puntuación simple (.,!?;:)
+    punctuation = string.punctuation.replace("'", "").replace("-", "")
+    for char in punctuation:
+        normalized = normalized.replace(char, " ")
+    # Normalizar espacios múltiples
+    normalized = " ".join(normalized.split())
+    return normalized
+
+
+def _find_timestamps_by_quote(
+    segments: list[TranscriptSegment], quote_start: str, quote_end: str
+) -> tuple[int | None, int | None]:
+    """Busca timestamps usando quotes exactos del texto.
+    
+    Normaliza el texto (minúsculas, ignorar puntuación simple) para búsqueda flexible.
+    Devuelve (start_ms, end_ms) o (None, None) si no encuentra alguno.
+    """
+    if not segments or not quote_start or not quote_end:
+        return None, None
+    
+    # Normalizar quotes para búsqueda
+    normalized_quote_start = _normalize_text_for_search(quote_start)
+    normalized_quote_end = _normalize_text_for_search(quote_end)
+    
+    if not normalized_quote_start or not normalized_quote_end:
+        return None, None
+    
+    # Buscar quote_start
+    start_ms = None
+    for segment in segments:
+        normalized_segment_text = _normalize_text_for_search(segment.text)
+        if normalized_quote_start in normalized_segment_text:
+            start_ms = segment.start_ms
+            break
+    
+    if start_ms is None:
+        return None, None
+    
+    # Buscar quote_end después del inicio encontrado
+    end_ms = None
+    found_start = False
+    for segment in segments:
+        if segment.start_ms >= start_ms:
+            found_start = True
+        if found_start:
+            normalized_segment_text = _normalize_text_for_search(segment.text)
+            if normalized_quote_end in normalized_segment_text:
+                end_ms = segment.end_ms
+                break
+    
+    if end_ms is None or end_ms <= start_ms:
+        return None, None
+    
+    return start_ms, end_ms
+
+
+def _ensure_utterances(
+    session, sermon_id: int, segments: list[TranscriptSegment], force_regenerate: bool = False
+) -> list[TranscriptUtterance]:
+    """Asegura que existan utterances para el sermon.
+    
+    Si ya existen y force_regenerate=False, las carga y devuelve ordenadas por idx.
+    Si no existen o force_regenerate=True, las genera desde segments y las guarda.
+    """
+    # Verificar si ya existen utterances
+    existing = list(
+        session.execute(
+            select(TranscriptUtterance)
+            .where(
+                TranscriptUtterance.sermon_id == sermon_id,
+                TranscriptUtterance.deleted_at.is_(None),
+            )
+            .order_by(TranscriptUtterance.idx.asc())
+        ).scalars().all()
+    )
+    
+    if existing and not force_regenerate:
+        logger.info("Found %d existing utterances for sermon %s", len(existing), sermon_id)
+        return existing
+    
+    # Si force_regenerate=True, borrar utterances existentes (soft delete)
+    if existing and force_regenerate:
+        from datetime import datetime
+        now = datetime.utcnow()
+        session.execute(
+            update(TranscriptUtterance)
+            .where(
+                TranscriptUtterance.sermon_id == sermon_id,
+                TranscriptUtterance.deleted_at.is_(None),
+            )
+            .values(deleted_at=now, updated_at=now)
+        )
+        session.commit()
+        logger.info("Force regenerating utterances for sermon %s (deleted %d existing)", sermon_id, len(existing))
+    
+    # Generar utterances desde segments
+    logger.info("Generating utterances for sermon %s from %d segments", sermon_id, len(segments))
+    utterances = []
+    global_idx = 1
+    
+    for segment in segments:
+        if not segment.text or segment.text.strip() == "":
+            continue
+        
+        text = segment.text.strip()
+        segment_duration = segment.end_ms - segment.start_ms
+        
+        if segment_duration <= 0:
+            continue
+        
+        # Dividir en oraciones preservando puntuación
+        # Patrón: captura texto hasta puntuación (incluyendo la puntuación) o texto sin puntuación al final
+        sentences = re.findall(r"[^.!?]+[.!?]+|[^.!?]+$", text)
+        if not sentences:
+            # Fallback: si no hay matches, usar el texto completo como una oración
+            sentences = [text]
+        
+        # Filtrar oraciones vacías
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if not sentences:
+            continue
+        
+        # Usar word timestamps si están disponibles (v3: timestamps exactos)
+        # Si no, usar cálculo proporcional (fallback para v1 o faster-whisper)
+        use_word_timestamps = segment.word_timestamps_json is not None and len(segment.word_timestamps_json) > 0
+        
+        if use_word_timestamps:
+            # Calcular timestamps usando word timestamps exactos
+            words = segment.word_timestamps_json
+            current_start = segment.start_ms
+            
+            for i, sentence in enumerate(sentences):
+                if not sentence:
+                    continue
+                
+                is_last_sentence = (i == len(sentences) - 1)
+                
+                # Normalizar sentence para búsqueda (sin puntuación, minúsculas)
+                sentence_normalized = _normalize_text_for_search(sentence)
+                sentence_words = [w for w in sentence_normalized.split() if w]  # Filtrar palabras vacías
+                
+                if not sentence_words:
+                    continue
+                
+                # Buscar las palabras de la sentence en los word timestamps
+                sentence_start_ms = None
+                sentence_end_ms = None
+                word_idx = 0
+                matched_words = []
+                
+                for word_data in words:
+                    word_text = word_data.get("text", "").strip()
+                    if not word_text:
+                        continue
+                    word_text_normalized = _normalize_text_for_search(word_text)
+                    
+                    # Buscar coincidencia con la primera palabra de la sentence
+                    if word_idx == 0 and sentence_words and word_text_normalized == sentence_words[0]:
+                        sentence_start_ms = word_data.get("start_ms")
+                        matched_words.append(word_data)
+                        word_idx = 1
+                    elif word_idx > 0 and word_idx < len(sentence_words):
+                        # Continuar buscando palabras de la sentence
+                        if word_text_normalized == sentence_words[word_idx]:
+                            matched_words.append(word_data)
+                            word_idx += 1
+                    
+                    # Si encontramos todas las palabras, usar el end_ms de la última palabra
+                    if word_idx >= len(sentence_words):
+                        sentence_end_ms = matched_words[-1].get("end_ms") if matched_words else word_data.get("end_ms")
+                        break
+                
+                # Si no encontramos timestamps exactos, usar fallback proporcional
+                if sentence_start_ms is None or sentence_end_ms is None:
+                    # Fallback a cálculo proporcional
+                    total_chars = sum(len(s) for s in sentences)
+                    if total_chars == 0:
+                        continue
+                    sentence_chars = len(sentence)
+                    sentence_duration = int((sentence_chars / total_chars) * segment_duration)
+                    sentence_duration = max(100, sentence_duration)
+                    sentence_start_ms = current_start
+                    sentence_end_ms = min(current_start + sentence_duration, segment.end_ms)
+                
+                # Asegurar que estén dentro del segmento
+                sentence_start_ms = max(segment.start_ms, sentence_start_ms)
+                sentence_end_ms = min(segment.end_ms, sentence_end_ms)
+                
+                # Si es la última oración, forzar end_ms = segment.end_ms
+                if is_last_sentence:
+                    sentence_end_ms = segment.end_ms
+                
+                # Validación final
+                if sentence_end_ms <= sentence_start_ms:
+                    continue
+                
+                utterance = TranscriptUtterance(
+                    sermon_id=sermon_id,
+                    idx=global_idx,
+                    start_ms=sentence_start_ms,
+                    end_ms=sentence_end_ms,
+                    text=sentence,
+                )
+                utterances.append(utterance)
+                global_idx += 1
+                current_start = sentence_end_ms
+                
+                if is_last_sentence:
+                    break
+        else:
+            # Método original: cálculo proporcional (para v1 o faster-whisper)
+            total_chars = sum(len(s) for s in sentences)
+            if total_chars == 0:
+                continue
+            
+            current_start = segment.start_ms
+            for i, sentence in enumerate(sentences):
+                if not sentence:
+                    continue
+                
+                # Si es la última oración del segmento, forzar end_ms = segment.end_ms
+                is_last_sentence = (i == len(sentences) - 1)
+                
+                if is_last_sentence:
+                    # Última utterance: termina exactamente en segment.end_ms
+                    sentence_start = max(current_start, segment.start_ms)
+                    sentence_end = segment.end_ms
+                else:
+                    # Calcular duración proporcional
+                    sentence_chars = len(sentence)
+                    sentence_duration = int((sentence_chars / total_chars) * segment_duration)
+                    
+                    # Asegurar mínimo de 100ms por utterance
+                    sentence_duration = max(100, sentence_duration)
+                    
+                    sentence_end = min(current_start + sentence_duration, segment.end_ms)
+                    
+                    # Asegurar end_ms > start_ms
+                    if sentence_end <= current_start:
+                        sentence_end = current_start + 100
+                    
+                    # Clamp dentro del segmento
+                    sentence_start = max(current_start, segment.start_ms)
+                    sentence_end = min(sentence_end, segment.end_ms)
+                
+                # Validación final: asegurar end_ms > start_ms
+                if sentence_end <= sentence_start:
+                    continue
+                
+                utterance = TranscriptUtterance(
+                    sermon_id=sermon_id,
+                    idx=global_idx,
+                    start_ms=sentence_start,
+                    end_ms=sentence_end,
+                    text=sentence,
+                )
+                utterances.append(utterance)
+                global_idx += 1
+                current_start = sentence_end
+                
+                # Si es la última oración, ya terminamos
+                if is_last_sentence:
+                    break
+    
+    if not utterances:
+        logger.warning("No utterances generated for sermon %s", sermon_id)
+        return []
+    
+    # Guardar en batch
+    session.bulk_save_objects(utterances)
+    session.commit()
+    
+    logger.info("Generated and saved %d utterances for sermon %s", len(utterances), sermon_id)
+    return utterances
+
+
+def _build_text_for_utterance_range(
+    utterances: list[TranscriptUtterance], start_u: int, end_u: int
+) -> str:
+    """Construye texto concatenando utterances desde start_u hasta end_u (inclusive)."""
+    if not utterances:
+        return ""
+    
+    # start_u y end_u son índices 1-based (idx en DB)
+    parts = []
+    for utterance in utterances:
+        if utterance.idx >= start_u and utterance.idx <= end_u:
+            text = (utterance.text or "").strip()
+            if text:
+                parts.append(text)
+    
+    return " ".join(parts).strip()
+
+
+def _looks_like_needs_context(text: str) -> bool:
+    """Detecta si el texto empieza con frases que requieren contexto previo.
+    
+    Retorna True si el texto normalizado empieza con conectores o referencias
+    que indican que necesita contexto anterior.
+    """
+    if not text:
+        return False
+    
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    
+    # Patrones de conectores que requieren contexto
+    context_patterns = [
+        r"^(pero|entonces|y|porque|o sea|asi que|así que|como te dije|como te decía|como dije|recuerda que|mira|ahora|bueno)\b",
+        r"^(eso|esto|esa|ese|aqui|ahí|alli|allí)\b",
+    ]
+    
+    for pattern in context_patterns:
+        if re.match(pattern, normalized):
+            return True
+    
+    return False
+
+
+def _looks_like_clean_end(text: str) -> bool:
+    """Detecta si el texto termina de forma limpia (conclusión completa).
+    
+    Retorna True si termina con puntuación de cierre (., !, ?, ...).
+    Retorna False si termina con conectores que indican continuación.
+    """
+    if not text:
+        return False
+    
+    stripped = text.strip()
+    if not stripped:
+        return False
+    
+    # Verificar si termina con conectores que indican continuación
+    continuation_pattern = re.compile(r"\b(y|pero|porque|entonces|asi que|así que|o sea)$", re.IGNORECASE)
+    if continuation_pattern.search(stripped):
+        return False
+    
+    # Verificar si termina con puntuación de cierre
+    if stripped.endswith(('.', '!', '?', '...')):
+        return True
+    
+    return False
+
+
+def _looks_like_incomplete_end(text: str) -> bool:
+    """Detecta si el texto termina de forma incompleta (requiere extensión).
+    
+    Retorna True si:
+    - Termina con conectores que indican continuación
+    - NO termina con puntuación de cierre (., !, ?, ...)
+    """
+    if not text:
+        return True
+    
+    normalized = text.strip().lower()
+    if not normalized:
+        return True
+    
+    # Verificar si termina con conectores que indican continuación
+    continuation_pattern = re.compile(r"\b(y|pero|porque|entonces|asi que|así que|o sea|para que|cuando|si)\s*$")
+    if continuation_pattern.search(normalized):
+        return True
+    
+    # Verificar si NO termina con puntuación de cierre
+    if not normalized.endswith(('.', '!', '?', '...')):
+        return True
+    
+    return False
 
 
 def _is_hook_advanced(text: str) -> tuple[bool, float]:
@@ -831,6 +1208,35 @@ def _adjust_to_segment_boundaries(
     return adjusted_start, adjusted_end
 
 
+def _adjust_to_segment_boundaries_v3(
+    segments: list[TranscriptSegment], start_ms: int, end_ms: int
+) -> tuple[int, int]:
+    """Snapping asimétrico: ceil para start, floor para end.
+    
+    - start_ms -> primer segment.start_ms >= start propuesto (ceil)
+    - end_ms -> último segment.end_ms <= end propuesto (floor)
+    
+    Esto evita que el clip empiece antes del hook o termine después.
+    """
+    if not segments:
+        return start_ms, end_ms
+    
+    starts = [s.start_ms for s in segments]
+    ends = [s.end_ms for s in segments]
+    
+    # Ceil: primer start >= start propuesto
+    start_candidates = [v for v in starts if v >= start_ms]
+    # Floor: último end <= end propuesto
+    end_candidates = [v for v in ends if v <= end_ms]
+    
+    adjusted_start = min(start_candidates) if start_candidates else max(starts)
+    adjusted_end = max(end_candidates) if end_candidates else min(ends)
+    
+    if adjusted_end <= adjusted_start:
+        return start_ms, end_ms
+    return adjusted_start, adjusted_end
+
+
 def _backfill_candidates(
     selected: list[dict],
     pool: list[dict],
@@ -1147,6 +1553,22 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
         sermon.progress = 5
         session.commit()
 
+        transcription_model = (sermon.transcription_model or "faster_whisper").strip().lower()
+        language = (sermon.language or "").strip().lower()
+        
+        # Log inicial con información del usuario
+        logger.info("=" * 60)
+        logger.info("USUARIO SUBIENDO VIDEO - Sermon ID: %s", sermon_id)
+        logger.info("  Idioma seleccionado: %s", language.upper() if language else "No especificado")
+        logger.info("  Modelo de transcripcion: %s", transcription_model.upper())
+        logger.info("=" * 60)
+        
+        count = 0
+        batch = []
+        batch_size = 100
+        last_progress = sermon.progress or 0
+        total_duration = None
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mp4_path = f"{tmpdir}/input.mp4"
             wav_path = f"{tmpdir}/audio.wav"
@@ -1178,64 +1600,290 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
                     sermon_id,
                     video_duration,
                 )
+                total_duration = video_duration
             except Exception as exc:
                 logger.warning("Failed to get video duration: %s", exc)
                 video_duration = None
 
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    mp4_path,
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "16000",
-                    wav_path,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-            model = WhisperModel("tiny", device="cpu", compute_type="int8")
-            language = (sermon.language or "").strip().lower()
-            transcribe_kwargs = {}
-            if language:
-                transcribe_kwargs["language"] = language
-            segments, info = model.transcribe(wav_path, **transcribe_kwargs)
-            total_duration = getattr(info, "duration", None)
-            if total_duration is None and isinstance(info, dict):
-                total_duration = info.get("duration")
-
-            count = 0
-            batch = []
-            batch_size = 100
-            last_progress = sermon.progress or 0
-            for segment in segments:
-                text = segment.text.strip()
-                if not text:
-                    continue
-                batch.append(
-                    TranscriptSegment(
-                        sermon_id=sermon.id,
-                        start_ms=int(segment.start * 1000),
-                        end_ms=int(segment.end * 1000),
-                        text=text,
-                    )
+            if transcription_model == "assemblyai":
+                # Transcripcion con AssemblyAI
+                if not settings.assemblyai_api_key:
+                    raise ValueError("ASSEMBLYAI_API_KEY no esta configurada")
+                
+                transcription_start_time = time.time()
+                
+                aai.settings.api_key = settings.assemblyai_api_key
+                transcriber = aai.Transcriber()
+                
+                # Configurar idioma si esta especificado
+                config = aai.TranscriptionConfig()
+                if language:
+                    if language == "es":
+                        config.language_code = aai.LanguageCode.es
+                    elif language == "en":
+                        config.language_code = aai.LanguageCode.en
+                
+                # Habilitar word timestamps para v3 (requerido para timestamps exactos)
+                # Nota: word_level_timestamps puede requerir configuración adicional
+                # Verificar documentación de AssemblyAI para habilitar words
+                
+                logger.info("Enviando video a AssemblyAI para transcripcion...")
+                
+                # Transcribir usando el archivo local (mp4_path ya está descargado)
+                transcript = transcriber.transcribe(mp4_path, config=config)
+                
+                if transcript.status == aai.TranscriptStatus.error:
+                    raise ValueError(f"AssemblyAI transcription error: {transcript.error}")
+                
+                # Esperar hasta que este completa
+                while transcript.status not in (aai.TranscriptStatus.completed, aai.TranscriptStatus.error):
+                    time.sleep(2)
+                    transcript = transcriber.get_transcript(transcript.id)
+                    if transcript.status == aai.TranscriptStatus.error:
+                        raise ValueError(f"AssemblyAI transcription error: {transcript.error}")
+                    # Actualizar progreso durante el polling
+                    if total_duration and total_duration > 0:
+                        estimated_progress = min(90, last_progress + 5)
+                        if estimated_progress - last_progress >= 5:
+                            sermon.progress = estimated_progress
+                            session.commit()
+                            last_progress = estimated_progress
+                
+                transcription_end_time = time.time()
+                transcription_duration = transcription_end_time - transcription_start_time
+                transcription_minutes = transcription_duration / 60.0
+                
+                logger.info("AssemblyAI devolvio la transcripcion en %.2f minutos (%.1f segundos)", transcription_minutes, transcription_duration)
+                
+                # Log para debug: verificar qué devuelve AssemblyAI
+                has_utterances = bool(transcript.utterances)
+                has_words = bool(transcript.words)
+                utterances_count = len(transcript.utterances) if transcript.utterances else 0
+                words_count = len(transcript.words) if transcript.words else 0
+                logger.info("AssemblyAI transcript: utterances=%s (%d), words=%s (%d)", 
+                           has_utterances, utterances_count, has_words, words_count)
+                
+                # Procesar segmentos usando utterances (frases completas)
+                if transcript.utterances:
+                    # Mapear words por utterance para timestamps precisos (v3)
+                    words_by_utterance = {}
+                    if transcript.words:
+                        # Agrupar words por utterance usando timestamps
+                        for word in transcript.words:
+                            word_start_ms = int(word.start)
+                            word_end_ms = int(word.end)
+                            # Encontrar el utterance que contiene esta palabra
+                            for idx, utterance in enumerate(transcript.utterances):
+                                utt_start_ms = int(utterance.start)
+                                utt_end_ms = int(utterance.end)
+                                if word_start_ms >= utt_start_ms and word_end_ms <= utt_end_ms:
+                                    if idx not in words_by_utterance:
+                                        words_by_utterance[idx] = []
+                                    words_by_utterance[idx].append({
+                                        "text": word.text.strip(),
+                                        "start_ms": word_start_ms,
+                                        "end_ms": word_end_ms
+                                    })
+                                    break
+                        
+                        logger.info("AssemblyAI: Mapped %d words to %d utterances", words_count, len(words_by_utterance))
+                    else:
+                        logger.warning("AssemblyAI: transcript.utterances exists but transcript.words is None/empty - word timestamps no disponibles")
+                    
+                    segments_with_word_timestamps = 0
+                    for idx, utterance in enumerate(transcript.utterances):
+                        text = utterance.text.strip()
+                        if not text:
+                            continue
+                        start_ms = int(utterance.start)
+                        end_ms = int(utterance.end)
+                        
+                        # Guardar word timestamps si están disponibles (para v3)
+                        word_timestamps = words_by_utterance.get(idx)
+                        if word_timestamps:
+                            segments_with_word_timestamps += 1
+                        
+                        batch.append(
+                            TranscriptSegment(
+                                sermon_id=sermon.id,
+                                start_ms=start_ms,
+                                end_ms=end_ms,
+                                text=text,
+                                word_timestamps_json=word_timestamps if word_timestamps else None,
+                            )
+                        )
+                        count += 1
+                        if len(batch) >= batch_size:
+                            session.bulk_save_objects(batch)
+                            session.commit()
+                            batch = []
+                        
+                        if total_duration and total_duration > 0:
+                            progress = int(min(95, max(5, (utterance.end / total_duration) * 90 + 5)))
+                            if progress - last_progress >= 2:
+                                sermon.progress = progress
+                                session.commit()
+                                last_progress = progress
+                    
+                    logger.info("AssemblyAI: Saved %d/%d segments with word timestamps", segments_with_word_timestamps, len(transcript.utterances))
+                elif transcript.words:
+                    # Fallback: usar palabras si no hay utterances
+                    # Agrupar palabras en segmentos y guardar word timestamps para v3
+                    current_text = []
+                    current_words = []  # Para guardar word timestamps del segmento actual
+                    current_start = None
+                    current_end = None
+                    
+                    for word in transcript.words:
+                        word_text = word.text.strip()
+                        if not word_text:
+                            continue
+                        word_start_ms = int(word.start)
+                        word_end_ms = int(word.end)
+                        
+                        if current_start is None:
+                            current_start = word_start_ms
+                            current_text = [word_text]
+                            current_words = [{
+                                "text": word_text,
+                                "start_ms": word_start_ms,
+                                "end_ms": word_end_ms
+                            }]
+                        elif (word_start_ms - current_end) < 2000:  # Agrupar si hay menos de 2 segundos de diferencia
+                            current_text.append(word_text)
+                            current_words.append({
+                                "text": word_text,
+                                "start_ms": word_start_ms,
+                                "end_ms": word_end_ms
+                            })
+                        else:
+                            # Guardar el segmento actual con word timestamps
+                            if current_text:
+                                batch.append(
+                                    TranscriptSegment(
+                                        sermon_id=sermon.id,
+                                        start_ms=current_start,
+                                        end_ms=current_end,
+                                        text=" ".join(current_text),
+                                        word_timestamps_json=current_words if current_words else None,
+                                    )
+                                )
+                                count += 1
+                                if len(batch) >= batch_size:
+                                    session.bulk_save_objects(batch)
+                                    session.commit()
+                                    batch = []
+                            # Iniciar nuevo segmento
+                            current_start = word_start_ms
+                            current_text = [word_text]
+                            current_words = [{
+                                "text": word_text,
+                                "start_ms": word_start_ms,
+                                "end_ms": word_end_ms
+                            }]
+                        
+                        current_end = word_end_ms
+                        
+                        if total_duration and total_duration > 0:
+                            progress = int(min(95, max(5, (word_end_ms / total_duration) * 90 + 5)))
+                            if progress - last_progress >= 2:
+                                sermon.progress = progress
+                                session.commit()
+                                last_progress = progress
+                    
+                    # Guardar el ultimo segmento con word timestamps
+                    if current_text and current_start is not None and current_end is not None:
+                        batch.append(
+                            TranscriptSegment(
+                                sermon_id=sermon.id,
+                                start_ms=current_start,
+                                end_ms=current_end,
+                                text=" ".join(current_text),
+                                word_timestamps_json=current_words if current_words else None,
+                            )
+                        )
+                        count += 1
+                    
+                    logger.info("AssemblyAI: Saved %d segments from words (all with word timestamps)", count)
+                else:
+                    raise ValueError("AssemblyAI transcription completed but no utterances or words found")
+            else:
+                # Transcripcion con faster-whisper (default)
+                # Medir tiempo de conversion video a audio
+                audio_conversion_start_time = time.time()
+                logger.info("Convirtiendo video a audio...")
+                
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        mp4_path,
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        wav_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
                 )
-                count += 1
-                if len(batch) >= batch_size:
-                    session.bulk_save_objects(batch)
-                    session.commit()
-                    batch = []
-                if total_duration:
-                    progress = int(min(95, max(5, (segment.end / total_duration) * 90 + 5)))
-                    if progress - last_progress >= 2:
-                        sermon.progress = progress
+                
+                audio_conversion_end_time = time.time()
+                audio_conversion_duration = audio_conversion_end_time - audio_conversion_start_time
+                audio_conversion_minutes = audio_conversion_duration / 60.0
+                logger.info("Conversion video->audio completada en %.2f minutos (%.1f segundos)", audio_conversion_minutes, audio_conversion_duration)
+                
+                # Medir tiempo de transcripcion
+                transcription_start_time = time.time()
+                logger.info("Transcribiendo audio con Faster-Whisper...")
+
+                model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                transcribe_kwargs = {}
+                if language:
+                    transcribe_kwargs["language"] = language
+                segments, info = model.transcribe(wav_path, **transcribe_kwargs)
+                
+                transcription_end_time = time.time()
+                transcription_duration = transcription_end_time - transcription_start_time
+                transcription_minutes = transcription_duration / 60.0
+                
+                seg_total_duration = getattr(info, "duration", None)
+                if seg_total_duration is None and isinstance(info, dict):
+                    seg_total_duration = info.get("duration")
+                if seg_total_duration and not total_duration:
+                    total_duration = seg_total_duration
+
+                for segment in segments:
+                    text = segment.text.strip()
+                    if not text:
+                        continue
+                    batch.append(
+                        TranscriptSegment(
+                            sermon_id=sermon.id,
+                            start_ms=int(segment.start * 1000),
+                            end_ms=int(segment.end * 1000),
+                            text=text,
+                        )
+                    )
+                    count += 1
+                    if len(batch) >= batch_size:
+                        session.bulk_save_objects(batch)
                         session.commit()
-                        last_progress = progress
+                        batch = []
+                    if total_duration:
+                        progress = int(min(95, max(5, (segment.end / total_duration) * 90 + 5)))
+                        if progress - last_progress >= 2:
+                            sermon.progress = progress
+                            session.commit()
+                            last_progress = progress
+                
+                total_time = audio_conversion_duration + transcription_duration
+                total_minutes = total_time / 60.0
+                
+                logger.info("Faster-Whisper completó la transcripcion en %.2f minutos (%.1f segundos)", transcription_minutes, transcription_duration)
+                logger.info("Tiempo total del proceso: %.2f minutos (%.1f segundos)", total_minutes, total_time)
 
             if batch:
                 session.bulk_save_objects(batch)
@@ -1280,16 +1928,15 @@ def transcribe_sermon(self, sermon_id: int) -> dict:
                                 missing=missing_seconds,
                             )
                         )
-
-            expected_segments = int(sermon.video_duration_sec / 3)
-            if expected_segments > 0 and count < expected_segments * 0.7:
-                transcription_ok = False
-                error_details.append(
-                    "Muy pocos segmentos: {count} de ~{expected} esperados".format(
-                        count=count,
-                        expected=expected_segments,
-                    )
-                )
+        elif count == 0:
+            # Si no hay segmentos generados, es un error
+            transcription_ok = False
+            error_details.append("No se generaron segmentos de transcripcion")
+        
+        # Nota: NO validamos cantidad de segmentos basado en video_duration_sec / 3
+        # porque Whisper genera segmentos de duración variable (1-10+ segundos) dependiendo
+        # del contenido del audio (pausas, silencios, velocidad de habla, etc.)
+        # La validación de cobertura de duración (arriba) es la métrica correcta.
 
         session.refresh(sermon)
         if sermon.deleted_at is not None:
@@ -1339,6 +1986,7 @@ def suggest_clips(
     use_llm: bool | None = None,
     llm_method: str = "scoring",
     llm_provider: str = "deepseek",
+    full_context_prompt_version: str = "v1",
 ) -> dict:
     session = SessionLocal()
     sermon = None
@@ -1363,15 +2011,48 @@ def suggest_clips(
         segments = list(session.execute(segments_query).scalars().all())
         if not segments:
             raise ValueError("No transcript segments available")
+        
+        # Validar word timestamps para v3
+        if full_context_prompt_version == "v3":
+            segments_with_word_timestamps = [s for s in segments if s.word_timestamps_json is not None and len(s.word_timestamps_json) > 0]
+            if not segments_with_word_timestamps:
+                error_msg = (
+                    "v3 requiere word timestamps exactos de AssemblyAI. "
+                    "Este sermon no tiene word timestamps. "
+                    "Usa AssemblyAI para transcribir o usa v1/v2 que no requieren word timestamps."
+                )
+                sermon.error_message = error_msg
+                session.commit()
+                raise ValueError(error_msg)
+            
+            # Verificar que al menos el 80% de los segments tengan word timestamps
+            coverage = len(segments_with_word_timestamps) / len(segments) if segments else 0
+            if coverage < 0.8:
+                error_msg = (
+                    f"v3 requiere word timestamps exactos. "
+                    f"Solo {coverage*100:.1f}% de los segments tienen word timestamps. "
+                    f"Usa AssemblyAI para transcribir o usa v1/v2."
+                )
+                sermon.error_message = error_msg
+                session.commit()
+                raise ValueError(error_msg)
+            
+            logger.info("v3: Validated word timestamps - %d/%d segments have word timestamps (%.1f%%)", 
+                       len(segments_with_word_timestamps), len(segments), coverage * 100)
 
         embeddings_ready = _attach_embeddings(session, segments)
         embedding_prefix = _build_embedding_prefix(segments) if embeddings_ready else None
 
-        logger.info(
-            "Suggesting clips for sermon %s using %s segments",
-            sermon_id,
-            len(segments),
+        use_llm_effective = (
+            settings.use_llm_for_clip_suggestions if use_llm is None else use_llm
         )
+        llm_provider_effective = llm_provider if llm_provider in ("deepseek", "openai") else "deepseek"
+        
+        if use_llm_effective:
+            provider_name = "OpenAI" if llm_provider_effective == "openai" else "Deepseek"
+            logger.info("Generando sugerencias de clips usando IA (%s) para sermon %s", provider_name, sermon_id)
+        else:
+            logger.info("Generando sugerencias de clips usando heuristica para sermon %s", sermon_id)
 
         breakpoints = _find_breakpoints(segments)
         candidates = _build_candidates(
@@ -1407,12 +2088,45 @@ def suggest_clips(
         token_usage_by_method: dict[str, dict] = {}
         llm_method_effective = llm_method if llm_method in ("scoring", "selection", "generation", "full-context") else "full-context"
 
+        # Pre-cargar utterances para v3 (reutilizar después)
+        utterances_for_v3 = None
+        if use_llm_effective and llm_method_effective == "full-context" and full_context_prompt_version == "v3":
+            try:
+                # Usar force_regenerate solo si está habilitado en settings
+                force_regenerate = getattr(settings, "force_regenerate_utterances", False)
+                utterances_for_v3 = _ensure_utterances(session, sermon_id, segments, force_regenerate=force_regenerate)
+                if utterances_for_v3:
+                    logger.info("v3: Pre-loaded %d utterances for transcript and mapping (force_regenerate=%s)", len(utterances_for_v3), force_regenerate)
+            except Exception as exc:
+                logger.warning("v3: Error pre-loading utterances: %s", exc)
+                utterances_for_v3 = None
+        
         if use_llm_effective and llm_method_effective == "full-context":
-            full_text = "\n".join(
-                f"[{segment.start_ms / 1000:.1f}s] {segment.text}"
-                for segment in segments
-                if segment.text
-            )
+            # v3 usa utterances, v1/v2 usan segments
+            if full_context_prompt_version == "v3":
+                if utterances_for_v3:
+                    full_text = "\n".join(
+                        f"[u{utterance.idx} {utterance.start_ms}-{utterance.end_ms}] {utterance.text}"
+                        for utterance in utterances_for_v3
+                        if utterance.text
+                    )
+                    logger.info("v3: Using utterances format for transcript: %d utterances", len(utterances_for_v3))
+                else:
+                    # Fallback a segments si no hay utterances
+                    logger.warning("v3: No utterances available, falling back to segments format")
+                    full_text = "\n".join(
+                        f"[{segment.start_ms / 1000:.1f}s] {segment.text}"
+                        for segment in segments
+                        if segment.text
+                    )
+            else:
+                # v1/v2: formato original con segments
+                full_text = "\n".join(
+                    f"[{segment.start_ms / 1000:.1f}s] {segment.text}"
+                    for segment in segments
+                    if segment.text
+                )
+            word_count = len(full_text.split())
             metadata = {
                 "title": sermon.title,
                 "preacher": sermon.preacher,
@@ -1434,6 +2148,63 @@ def suggest_clips(
                     error_class = DeepseekClientError
                     provider_name = "Deepseek"
 
+                llm_start_time = time.time()
+                logger.info("Enviando a %s un transcript de %d palabras para sugerencias de clips...", provider_name, word_count)
+                
+                # Escribir transcript completo a transcript.md en la raíz
+                try:
+                    from pathlib import Path
+                    # Desde apps/worker/src/tasks.py -> apps/worker/src -> apps/worker -> apps -> raíz
+                    root_dir = Path(__file__).resolve().parents[3]
+                    transcript_path = root_dir / "transcript.md"
+                    
+                    # Construir el user_prompt completo que se enviará
+                    if full_context_prompt_version == "v3":
+                        system_prompt = full_context_system_prompt_v3()
+                    elif full_context_prompt_version == "v2":
+                        system_prompt = full_context_system_prompt_v2()
+                    else:
+                        system_prompt = full_context_system_prompt()
+                    
+                    duration_label = f"{metadata.get('duration_sec', 0):.1f}s"
+                    user_prompt = full_context_user_prompt(
+                        title=metadata.get("title", ""),
+                        preacher=metadata.get("preacher", ""),
+                        duration_label=duration_label,
+                        transcript=full_text,
+                    )
+                    
+                    transcript_content = f"""# Transcript enviado a {provider_name}
+
+## Metadata
+- Sermon ID: {sermon_id}
+- Título: {metadata.get('title', 'N/A')}
+- Predicador: {metadata.get('preacher', 'N/A')}
+- Duración: {duration_label}
+- Prompt Version: {full_context_prompt_version}
+- Provider: {provider_name}
+- Model: {model}
+- Palabras: {word_count}
+
+## System Prompt
+
+{system_prompt}
+
+## User Prompt
+
+{user_prompt}
+
+## Transcript Completo (sin truncar)
+
+{full_text}
+"""
+                    
+                    with open(transcript_path, "w", encoding="utf-8") as f:
+                        f.write(transcript_content)
+                    logger.info("Transcript completo guardado en %s", transcript_path)
+                except Exception as exc:
+                    logger.warning("Error al guardar transcript.md: %s", exc)
+                
                 response = generate_fn(
                     full_text,
                     metadata,
@@ -1441,7 +2212,13 @@ def suggest_clips(
                     base_url=base_url,
                     model=model,
                     timeout=120.0,
+                    prompt_version=full_context_prompt_version,
                 )
+                
+                llm_end_time = time.time()
+                llm_duration = llm_end_time - llm_start_time
+                llm_minutes = llm_duration / 60.0
+                
                 token_usage = response.get("token_usage")
                 if token_usage:
                     token_usage_by_method["full-context"] = _merge_token_usage(
@@ -1450,17 +2227,491 @@ def suggest_clips(
                     )
                 suggestions = response.get("clips") or []
                 candidates = []
+                
+                # Para v3, reutilizar utterances ya cargadas (no recargar)
+                utterances = None
+                if full_context_prompt_version == "v3":
+                    if utterances_for_v3:
+                        utterances = utterances_for_v3
+                        logger.info("v3: Reusing utterances list for mapping (no re-fetch)")
+                    else:
+                        try:
+                            utterances = _ensure_utterances(session, sermon_id, segments)
+                            logger.warning("v3: Had to reload utterances for mapping (should not happen)")
+                        except Exception as exc:
+                            logger.warning("v3: Error loading utterances for mapping: %s", exc)
+                            utterances = None
+                
+                # Log ejemplo de suggestion cruda (solo v3, solo una vez, truncado)
+                if full_context_prompt_version == "v3" and suggestions:
+                    example = dict(suggestions[0])
+                    # Truncar strings largas
+                    for key, value in example.items():
+                        if isinstance(value, str) and len(value) > 300:
+                            example[key] = value[:300] + "..."
+                    logger.debug("v3: raw_suggestion_example=%s", example)
+                
                 for suggestion in suggestions:
+                    used_utterances = False
+                    
+                    # v3: intentar usar start_u/end_u primero
+                    if full_context_prompt_version == "v3" and utterances:
+                        start_u = suggestion.get("start_u")
+                        end_u = suggestion.get("end_u")
+                        
+                        if start_u is not None and end_u is not None:
+                            try:
+                                start_u_val = int(start_u)
+                                end_u_val = int(end_u)
+                                
+                                # Validar rango de IDs (1..len(utterances))
+                                utterances_len = len(utterances)
+                                if start_u_val < 1 or start_u_val > utterances_len or end_u_val < 1 or end_u_val > utterances_len:
+                                    logger.warning(
+                                        "v3: INVALID_UTTERANCE_RANGE start_u=%d end_u=%d utterances_len=%d -> falling back",
+                                        start_u_val, end_u_val, utterances_len
+                                    )
+                                    # Continuar al fallback
+                                else:
+                                    # Validar que los IDs existan
+                                    start_utterance = next(
+                                        (u for u in utterances if u.idx == start_u_val), None
+                                    )
+                                    end_utterance = next(
+                                        (u for u in utterances if u.idx == end_u_val), None
+                                    )
+                                    
+                                    if start_utterance and end_utterance:
+                                        start_ms = start_utterance.start_ms
+                                        end_ms = end_utterance.end_ms
+                                        
+                                        if end_ms <= start_ms:
+                                            logger.debug("v3: Invalid utterance range (end <= start): start_u=%d end_u=%d", start_u_val, end_u_val)
+                                            continue
+                                        
+                                        # Pre/post roll removido de aquí - se aplicará al final después de todos los guardrails
+                                        sermon_end_ms = segments[-1].end_ms if segments else end_ms
+                                        duration_ms = end_ms - start_ms
+                                        
+                                        if duration_ms < MIN_CLIP_MS or duration_ms > MAX_CLIP_MS:
+                                            logger.debug("v3: Duration out of range: %dms (start_u=%d end_u=%d)", duration_ms, start_u_val, end_u_val)
+                                            continue
+                                        
+                                        # Construir texto desde utterances (sin snapping)
+                                        text = _build_text_for_utterance_range(utterances, start_u_val, end_u_val)
+                                        if not text:
+                                            logger.debug("v3: Empty text for utterance range: start_u=%d end_u=%d", start_u_val, end_u_val)
+                                            continue
+                                        
+                                        # Context guardrail: ajustar start_u si el clip empieza con frases que requieren contexto
+                                        original_start_u = start_u_val
+                                        if _looks_like_needs_context(start_utterance.text):
+                                            adjusted = False
+                                            for back in [1, 2, 3]:
+                                                candidate_start_u = start_u_val - back
+                                                if candidate_start_u < 1:
+                                                    break
+                                                
+                                                candidate_start_utterance = next(
+                                                    (u for u in utterances if u.idx == candidate_start_u), None
+                                                )
+                                                if not candidate_start_utterance:
+                                                    break
+                                                
+                                                # Calcular nueva duración
+                                                candidate_start_ms = candidate_start_utterance.start_ms
+                                                candidate_duration_ms = end_ms - candidate_start_ms
+                                                
+                                                # Validar que no exceda MAX_CLIP_MS
+                                                if candidate_duration_ms > MAX_CLIP_MS:
+                                                    logger.debug(
+                                                        "v3: Context guardrail: candidate start_u=%d would exceed MAX_CLIP_MS (%d > %d), skipping",
+                                                        candidate_start_u, candidate_duration_ms, MAX_CLIP_MS
+                                                    )
+                                                    continue
+                                                
+                                                # Validar que no sea menor que MIN_CLIP_MS (aunque normalmente crecerá)
+                                                if candidate_duration_ms < MIN_CLIP_MS:
+                                                    logger.debug(
+                                                        "v3: Context guardrail: candidate start_u=%d would be below MIN_CLIP_MS (%d < %d), skipping",
+                                                        candidate_start_u, candidate_duration_ms, MIN_CLIP_MS
+                                                    )
+                                                    continue
+                                                
+                                                # Reconstruir texto con el candidato para validar
+                                                candidate_text = _build_text_for_utterance_range(utterances, candidate_start_u, end_u_val)
+                                                if not candidate_text:
+                                                    logger.debug(
+                                                        "v3: Context guardrail: candidate start_u=%d produces empty text, skipping",
+                                                        candidate_start_u
+                                                    )
+                                                    continue
+                                                
+                                                # Aceptar el primer candidato válido
+                                                start_u_val = candidate_start_u
+                                                start_ms = candidate_start_ms
+                                                duration_ms = candidate_duration_ms
+                                                text = candidate_text
+                                                
+                                                logger.info(
+                                                    "v3: CONTEXT_GUARD adjusted start_u %d->%d (reason=needs_context) duration_ms=%d",
+                                                    original_start_u, start_u_val, duration_ms
+                                                )
+                                                adjusted = True
+                                                break
+                                            
+                                            if not adjusted:
+                                                logger.debug(
+                                                    "v3: Context guardrail: could not adjust start_u=%d (no valid candidates within limits)",
+                                                    original_start_u
+                                                )
+                                        
+                                        # Hook guardrail: mejorar hooks flojos
+                                        _, current_hook_score = _is_hook_advanced(start_utterance.text)
+                                        if current_hook_score < 0.35:
+                                            # Evaluar primeras 6 utterances del rango
+                                            eval_end_u = min(start_u_val + 5, end_u_val)
+                                            best_hook_score = current_hook_score
+                                            best_hook_idx = start_u_val
+                                            
+                                            for eval_idx in range(start_u_val, eval_end_u + 1):
+                                                if eval_idx > utterances_len:
+                                                    break
+                                                eval_utterance = next(
+                                                    (u for u in utterances if u.idx == eval_idx), None
+                                                )
+                                                if not eval_utterance:
+                                                    continue
+                                                
+                                                _, eval_hook_score = _is_hook_advanced(eval_utterance.text)
+                                                if eval_hook_score >= 0.45 and eval_hook_score > best_hook_score:
+                                                    best_hook_score = eval_hook_score
+                                                    # Si el mejor hook está después del start actual, usar el anterior como setup
+                                                    if eval_idx > start_u_val:
+                                                        best_hook_idx = eval_idx - 1
+                                                    else:
+                                                        best_hook_idx = eval_idx
+                                            
+                                            if best_hook_idx != start_u_val:
+                                                # Ajustar start_u hacia atrás o adelante según el mejor hook
+                                                candidate_start_u = best_hook_idx
+                                                candidate_start_utterance = next(
+                                                    (u for u in utterances if u.idx == candidate_start_u), None
+                                                )
+                                                
+                                                if candidate_start_utterance:
+                                                    candidate_start_ms = candidate_start_utterance.start_ms
+                                                    candidate_duration_ms = end_ms - candidate_start_ms
+                                                    
+                                                    if candidate_duration_ms <= MAX_CLIP_MS and candidate_duration_ms >= MIN_CLIP_MS:
+                                                        candidate_text = _build_text_for_utterance_range(utterances, candidate_start_u, end_u_val)
+                                                        if candidate_text:
+                                                            old_start_u = start_u_val
+                                                            start_u_val = candidate_start_u
+                                                            start_ms = candidate_start_ms
+                                                            duration_ms = candidate_duration_ms
+                                                            text = candidate_text
+                                                            start_utterance = candidate_start_utterance
+                                                            
+                                                            logger.info(
+                                                                "v3: HOOK_GUARD adjusted start_u %d->%d hook_score %.2f->%.2f duration_ms=%d",
+                                                                old_start_u, start_u_val, current_hook_score, best_hook_score, duration_ms
+                                                            )
+                                        
+                                        # CLOSING_GUARD mejorado: cerrar idea si termina incompleto
+                                        original_end_u = end_u_val
+                                        if _looks_like_incomplete_end(end_utterance.text):
+                                            # Intentar extender end_u hasta +10 o hasta encontrar cierre natural
+                                            for extend in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+                                                candidate_end_u = end_u_val + extend
+                                                if candidate_end_u > utterances_len:
+                                                    break
+                                                
+                                                candidate_end_utterance = next(
+                                                    (u for u in utterances if u.idx == candidate_end_u), None
+                                                )
+                                                if not candidate_end_utterance:
+                                                    break
+                                                
+                                                candidate_end_ms = candidate_end_utterance.end_ms
+                                                candidate_duration_ms = candidate_end_ms - start_ms
+                                                
+                                                if candidate_duration_ms > MAX_CLIP_MS:
+                                                    break
+                                                
+                                                candidate_text = _build_text_for_utterance_range(utterances, start_u_val, candidate_end_u)
+                                                if not candidate_text:
+                                                    break
+                                                
+                                                # Verificar si el nuevo end es clean (puntuación fuerte y NO conector)
+                                                if _looks_like_clean_end(candidate_end_utterance.text):
+                                                    end_u_val = candidate_end_u
+                                                    end_ms = candidate_end_ms
+                                                    duration_ms = candidate_duration_ms
+                                                    text = candidate_text
+                                                    end_utterance = candidate_end_utterance
+                                                    
+                                                    logger.info(
+                                                        "v3: CLOSING_GUARD extended end_u %d->%d duration_ms=%d reason=incomplete_end",
+                                                        original_end_u, end_u_val, duration_ms
+                                                    )
+                                                    break
+                                        
+                                        # Si end_u ya es limpio pero el texto termina corto, permitir extender 1-3 utterances
+                                        if _looks_like_clean_end(end_utterance.text):
+                                            # Verificar si el texto final es muy corto o suena abierto
+                                            final_text_len = len(end_utterance.text.strip())
+                                            if final_text_len < 20:  # Texto muy corto
+                                                for extend in [1, 2, 3]:
+                                                    candidate_end_u = end_u_val + extend
+                                                    if candidate_end_u > utterances_len:
+                                                        break
+                                                    
+                                                    candidate_end_utterance = next(
+                                                        (u for u in utterances if u.idx == candidate_end_u), None
+                                                    )
+                                                    if not candidate_end_utterance:
+                                                        break
+                                                    
+                                                    candidate_end_ms = candidate_end_utterance.end_ms
+                                                    candidate_duration_ms = candidate_end_ms - start_ms
+                                                    
+                                                    if candidate_duration_ms > MAX_CLIP_MS:
+                                                        break
+                                                    
+                                                    candidate_text = _build_text_for_utterance_range(utterances, start_u_val, candidate_end_u)
+                                                    if not candidate_text:
+                                                        break
+                                                    
+                                                    # Verificar que el nuevo end también sea clean
+                                                    if _looks_like_clean_end(candidate_end_utterance.text):
+                                                        end_u_val = candidate_end_u
+                                                        end_ms = candidate_end_ms
+                                                        duration_ms = candidate_duration_ms
+                                                        text = candidate_text
+                                                        end_utterance = candidate_end_utterance
+                                                        
+                                                        logger.info(
+                                                            "v3: CLOSING_GUARD extended end_u %d->%d duration_ms=%d reason=short_final",
+                                                            original_end_u, end_u_val, duration_ms
+                                                        )
+                                                        break
+                                        
+                                        # POST_ROLL mejorado: evitar cortar palabras sin pasarse al siguiente tema
+                                        PAD_MS = 800  # Aumentado de 300 a 800ms
+                                        original_end_ms_before_roll = end_ms
+                                        
+                                        # Calcular next_start_ms del siguiente utterance (si existe)
+                                        next_utterance = next(
+                                            (u for u in utterances if u.idx == end_u_val + 1), None
+                                        )
+                                        next_start_ms = next_utterance.start_ms if next_utterance else None
+                                        
+                                        # Aplicar post-roll con clamp inteligente
+                                        candidate_end_ms = end_ms + PAD_MS
+                                        
+                                        # Clamp por sermon_end_ms
+                                        candidate_end_ms = min(candidate_end_ms, sermon_end_ms)
+                                        
+                                        # Clamp por siguiente utterance SOLO si hay gap real >= 500ms
+                                        # Esto permite arreglar cortes de palabra cuando end_ms cae en mitad de palabra
+                                        clamped_by_next = False
+                                        if next_start_ms is not None:
+                                            gap_ms = next_start_ms - end_ms
+                                            if gap_ms >= 500:
+                                                # Hay gap real, aplicar clamp para no pasarse al siguiente tema
+                                                candidate_end_ms = min(candidate_end_ms, next_start_ms - 50)
+                                                clamped_by_next = True
+                                            # Si gap < 500ms, NO clamps (permite arreglar cortes de palabra)
+                                        
+                                        candidate_duration_ms = candidate_end_ms - start_ms
+                                        
+                                        # Validar que no exceda MAX_CLIP_MS
+                                        if candidate_duration_ms <= MAX_CLIP_MS:
+                                            end_ms = candidate_end_ms
+                                            duration_ms = candidate_duration_ms
+                                            
+                                            logger.debug(
+                                                "v3: END_PAD applied pad_ms=%d end_ms %d->%d clamped_by_next=%s (gap=%s)",
+                                                PAD_MS, original_end_ms_before_roll, end_ms, clamped_by_next,
+                                                f"{next_start_ms - original_end_ms_before_roll}ms" if next_start_ms else "N/A"
+                                            )
+                                        else:
+                                            # Revertir post-roll si excede
+                                            logger.debug(
+                                                "v3: END_PAD skipped (would exceed MAX_CLIP_MS: %d > %d)",
+                                                candidate_duration_ms, MAX_CLIP_MS
+                                            )
+                                        
+                                        # Safety net: snap final a boundary real de TranscriptSegment
+                                        if segments:
+                                            # Buscar el segment end_ms inmediato >= end_ms (ceil)
+                                            candidate_end_ms = None
+                                            min_diff = float('inf')
+                                            
+                                            for segment in segments:
+                                                if segment.end_ms >= end_ms:
+                                                    diff = segment.end_ms - end_ms
+                                                    if diff <= 800 and diff < min_diff:
+                                                        candidate_end_ms = segment.end_ms
+                                                        min_diff = diff
+                                            
+                                            if candidate_end_ms is not None:
+                                                original_end_ms_before_snap = end_ms
+                                                end_ms = candidate_end_ms
+                                                duration_ms = end_ms - start_ms
+                                                
+                                                # Validar que no exceda MAX_CLIP_MS
+                                                if duration_ms <= MAX_CLIP_MS:
+                                                    logger.info(
+                                                        "v3: END_SNAP_SEGMENT end_ms %d->%d",
+                                                        original_end_ms_before_snap, end_ms
+                                                    )
+                                                else:
+                                                    # Revertir snap si excede
+                                                    end_ms = original_end_ms_before_snap
+                                                    duration_ms = end_ms - start_ms
+                                        
+                                        # START_PAD robusto: aplicar al final después de todos los guardrails
+                                        START_PAD_MS = 400
+                                        original_start_ms_before_pad = start_ms
+                                        
+                                        # Aplicar pre-roll
+                                        candidate_start_ms = max(0, start_ms - START_PAD_MS)
+                                        
+                                        # Clamp inteligente por prev_utterance (solo si hay silencio real)
+                                        prev_utterance = next(
+                                            (u for u in utterances if u.idx == start_u_val - 1), None
+                                        )
+                                        clamped_by_prev = False
+                                        gap_prev = None
+                                        
+                                        if prev_utterance:
+                                            gap_prev = start_utterance.start_ms - prev_utterance.end_ms
+                                            if gap_prev >= 600:  # Silencio real
+                                                # Clamp para no cortar sílabas en el silencio
+                                                candidate_start_ms = max(candidate_start_ms, prev_utterance.end_ms + 50)
+                                                clamped_by_prev = True
+                                            # Si gap < 600ms, NO clamps (permite arreglar cortes de palabra)
+                                        
+                                        candidate_duration_ms = end_ms - candidate_start_ms
+                                        
+                                        # Validar que no exceda MAX_CLIP_MS ni sea menor que MIN_CLIP_MS
+                                        if candidate_duration_ms <= MAX_CLIP_MS and candidate_duration_ms >= MIN_CLIP_MS:
+                                            start_ms = candidate_start_ms
+                                            duration_ms = candidate_duration_ms
+                                            
+                                            logger.debug(
+                                                "v3: START_PAD applied pad_ms=%d start_ms %d->%d clamped_by_prev=%s (gap_prev=%s)",
+                                                START_PAD_MS, original_start_ms_before_pad, start_ms, clamped_by_prev,
+                                                f"{gap_prev}ms" if gap_prev is not None else "N/A"
+                                            )
+                                        else:
+                                            # Revertir pre-roll si excede límites
+                                            logger.debug(
+                                                "v3: START_PAD skipped (would exceed limits: duration_ms=%d, MIN=%d MAX=%d)",
+                                                candidate_duration_ms, MIN_CLIP_MS, MAX_CLIP_MS
+                                            )
+                                        
+                                        # Safety net opcional: START_SNAP_SEGMENT (solo si cercano)
+                                        if segments:
+                                            # Buscar el segment start_ms inmediato <= start_ms (floor)
+                                            candidate_start_ms_snap = None
+                                            min_diff = float('inf')
+                                            
+                                            for segment in segments:
+                                                if segment.start_ms <= start_ms:
+                                                    diff = start_ms - segment.start_ms
+                                                    if diff <= 800 and diff < min_diff:
+                                                        candidate_start_ms_snap = segment.start_ms
+                                                        min_diff = diff
+                                            
+                                            if candidate_start_ms_snap is not None:
+                                                original_start_ms_before_snap = start_ms
+                                                candidate_start_ms_snap_final = candidate_start_ms_snap
+                                                candidate_duration_ms_snap = end_ms - candidate_start_ms_snap_final
+                                                
+                                                # Validar que no exceda MAX_CLIP_MS ni sea menor que MIN_CLIP_MS
+                                                if candidate_duration_ms_snap <= MAX_CLIP_MS and candidate_duration_ms_snap >= MIN_CLIP_MS:
+                                                    start_ms = candidate_start_ms_snap_final
+                                                    duration_ms = candidate_duration_ms_snap
+                                                    
+                                                    logger.info(
+                                                        "v3: START_SNAP_SEGMENT start_ms %d->%d",
+                                                        original_start_ms_before_snap, start_ms
+                                                    )
+                                        
+                                        reason = suggestion.get("reason") or ""
+                                        theme = suggestion.get("theme") or ""
+                                        rationale = (
+                                            f"{reason} (theme: {theme})" if theme else str(reason)
+                                        )
+                                        candidates.append(
+                                            {
+                                                "start_ms": start_ms,
+                                                "end_ms": end_ms,
+                                                "text": text,
+                                                "llm_score": suggestion.get("score"),
+                                                "llm_reason": rationale,
+                                                "llm_method": "full-context",
+                                            }
+                                        )
+                                        logger.info(
+                                            "v3: USING_UTTERANCE_IDS start_u=%d end_u=%d -> start_ms=%d end_ms=%d duration_ms=%d",
+                                            start_u_val, end_u_val, start_ms, end_ms, duration_ms
+                                        )
+                                        used_utterances = True
+                                        continue
+                                    else:
+                                        logger.warning(
+                                            "v3: INVALID_UTTERANCE_RANGE start_u=%d end_u=%d utterances_len=%d (IDs not found) -> falling back",
+                                            start_u_val, end_u_val, utterances_len
+                                        )
+                            except (TypeError, ValueError) as exc:
+                                logger.debug("v3: Invalid utterance IDs (type error): start_u=%s end_u=%s: %s", start_u, end_u, exc)
+                        
+                        # Si llegamos aquí y no se usaron utterances, loguear fallback
+                        if not used_utterances and full_context_prompt_version == "v3":
+                            suggestion_keys = list(suggestion.keys())
+                            logger.warning(
+                                "v3: FALLBACK_MISSING_UTTERANCE_IDS suggestion_keys=%s (using timestamps/quotes + snapping)",
+                                suggestion_keys
+                            )
+                    
+                    # Fallback: quotes (v2) o timestamps (v1/v3)
+                    quote_start = suggestion.get("quote_start")
+                    quote_end = suggestion.get("quote_end")
                     start_sec = suggestion.get("start_sec")
                     end_sec = suggestion.get("end_sec")
-                    try:
-                        start_ms = int(round(float(start_sec) * 1000))
-                        end_ms = int(round(float(end_sec) * 1000))
-                    except (TypeError, ValueError):
-                        continue
-                    start_ms, end_ms = _adjust_to_segment_boundaries(
-                        segments, start_ms, end_ms
-                    )
+                    
+                    # Intentar usar quotes primero (v2)
+                    start_ms = None
+                    end_ms = None
+                    if quote_start and quote_end:
+                        start_ms, end_ms = _find_timestamps_by_quote(
+                            segments, quote_start, quote_end
+                        )
+                    
+                    # Fallback a timestamps si quotes no funcionaron o no existen (v1/v3)
+                    if start_ms is None or end_ms is None:
+                        if start_sec is not None and end_sec is not None:
+                            try:
+                                start_ms = int(round(float(start_sec) * 1000))
+                                end_ms = int(round(float(end_sec) * 1000))
+                            except (TypeError, ValueError):
+                                continue
+                        else:
+                            continue
+                    
+                    # v3 usa snapping asimétrico (ceil/floor), v1/v2 usan nearest
+                    if full_context_prompt_version == "v3":
+                        start_ms, end_ms = _adjust_to_segment_boundaries_v3(
+                            segments, start_ms, end_ms
+                        )
+                    else:
+                        start_ms, end_ms = _adjust_to_segment_boundaries(
+                            segments, start_ms, end_ms
+                        )
                     duration_ms = end_ms - start_ms
                     if duration_ms < MIN_CLIP_MS or duration_ms > MAX_CLIP_MS:
                         continue
@@ -1486,13 +2737,19 @@ def suggest_clips(
                     raise error_class(
                         f"{provider_name} returned no usable full-context clips"
                     )
+                logger.info("%s respondio en %.2f minutos y sugirio %d clips", provider_name, llm_minutes, len(candidates))
                 llm_used = True
             except (DeepseekClientError, OpenAIClientError) as exc:
-                logger.warning(
-                    "%s full-context unavailable, falling back to heuristics: %s",
+                logger.error(
+                    "%s full-context unavailable, falling back to heuristics: %s (type=%s, args=%s)",
                     provider_name if llm_provider_effective == "openai" else "Deepseek",
                     exc,
+                    type(exc).__name__,
+                    exc.args if hasattr(exc, 'args') else None,
                 )
+                # Log el error original si está disponible
+                if hasattr(exc, '__cause__') and exc.__cause__:
+                    logger.error("Original error: %s: %s", type(exc.__cause__).__name__, exc.__cause__)
                 candidates = all_candidates
                 llm_used = False
                 token_usage = None
@@ -2020,11 +3277,8 @@ def render_clip(self, clip_id: int) -> dict:
         crf = render_settings.get("crf")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            input_path = f"{tmpdir}/input.mp4"
             ass_path = f"{tmpdir}/captions.ass"
             output_path = f"{tmpdir}/output.mp4"
-
-            download_object(sermon.source_url, input_path)
 
             template_config = _resolve_template_config(session, clip)
             with open(ass_path, "w", encoding="utf-8") as handle:
@@ -2032,254 +3286,50 @@ def render_clip(self, clip_id: int) -> dict:
 
             start_sec = clip.start_ms / 1000.0
             end_sec = clip.end_ms / 1000.0
+            duration_sec = end_sec - start_sec
 
-            if clip.reframe_mode == ClipReframeMode.face:
-                clip_path = f"{tmpdir}/clip_input.mp4"
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        input_path,
-                        "-ss",
-                        str(start_sec),
-                        "-to",
-                        str(end_sec),
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        preset,
-                        *(["-crf", crf] if crf else []),
-                        "-b:v",
-                        video_bitrate,
-                        "-maxrate",
-                        maxrate,
-                        "-bufsize",
-                        bufsize,
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        audio_bitrate,
-                        clip_path,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
+            # Usar presigned URL para streaming directo (no descarga el video completo)
+            presigned_url = create_presigned_get_url(
+                sermon.source_url, expires_in=3600, use_public_endpoint=False
+            )
 
-                metadata = get_video_metadata(clip_path)
-                track = detect_face_track(clip_path, target_fps=2.0, smooth_window=5)
-                segment_files: list[str] = []
-
-                if not track or not metadata:
-                    logger.warning(
-                        "Face tracking unavailable for clip %s, using center crop",
-                        clip_id,
-                    )
-                else:
-                    scale_w, scale_h = compute_scaled_dims(
-                        metadata.width,
-                        metadata.height,
-                        target_width=target_width,
-                        target_height=target_height,
-                    )
-                    duration_ms = int((end_sec - start_sec) * 1000)
-                    segment_ms = 500
-                    centers = build_segment_centers(
-                        track, duration_ms, segment_ms=segment_ms, default_center=0.5
-                    )
-
-                    segments_dir = f"{tmpdir}/segments"
-                    os.makedirs(segments_dir, exist_ok=True)
-                    for index, (t_ms, center_norm) in enumerate(centers):
-                        seg_start = t_ms / 1000.0
-                        seg_duration = min(segment_ms, duration_ms - t_ms) / 1000.0
-                        if seg_duration <= 0:
-                            continue
-                        crop_x = compute_crop_x(center_norm, scale_w, target_width)
-                        segment_path = f"{segments_dir}/seg_{index:04d}.mp4"
-                        subprocess.run(
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-ss",
-                                str(seg_start),
-                                "-t",
-                                str(seg_duration),
-                                "-i",
-                                clip_path,
-                                "-vf",
-                                f"scale={scale_w}:{scale_h},crop={target_width}:{target_height}:{crop_x}:0",
-                                "-c:v",
-                                "libx264",
-                                "-preset",
-                                preset,
-                                *(["-crf", crf] if crf else []),
-                                "-b:v",
-                                video_bitrate,
-                                "-maxrate",
-                                maxrate,
-                                "-bufsize",
-                                bufsize,
-                                "-c:a",
-                                "aac",
-                                "-b:a",
-                                audio_bitrate,
-                                segment_path,
-                            ],
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                        )
-                        segment_files.append(segment_path)
-
-                    if segment_files:
-                        concat_path = f"{tmpdir}/concat.txt"
-                        with open(concat_path, "w", encoding="utf-8") as handle:
-                            for path in segment_files:
-                                handle.write(f"file '{path}'\n")
-
-                        concat_output = f"{tmpdir}/concat.mp4"
-                        subprocess.run(
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-f",
-                                "concat",
-                                "-safe",
-                                "0",
-                                "-i",
-                                concat_path,
-                                "-c:v",
-                                "libx264",
-                                "-preset",
-                                preset,
-                                *(["-crf", crf] if crf else []),
-                                "-b:v",
-                                video_bitrate,
-                                "-maxrate",
-                                maxrate,
-                                "-bufsize",
-                                bufsize,
-                                "-c:a",
-                                "aac",
-                                "-b:a",
-                                audio_bitrate,
-                                concat_output,
-                            ],
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                        )
-
-                        subprocess.run(
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-i",
-                                concat_output,
-                                "-vf",
-                                "subtitles=captions.ass",
-                                "-c:v",
-                                "libx264",
-                                "-preset",
-                                preset,
-                                *(["-crf", crf] if crf else []),
-                                "-b:v",
-                                video_bitrate,
-                                "-maxrate",
-                                maxrate,
-                                "-bufsize",
-                                bufsize,
-                                "-c:a",
-                                "aac",
-                                "-b:a",
-                                audio_bitrate,
-                                output_path,
-                            ],
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                            cwd=tmpdir,
-                        )
-                    else:
-                        logger.warning(
-                            "Face tracking yielded no segments for clip %s, using center crop",
-                            clip_id,
-                        )
-
-                if not track or not metadata or not segment_files:
-                    subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            input_path,
-                            "-ss",
-                            str(start_sec),
-                            "-to",
-                            str(end_sec),
-                            "-vf",
-                            f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
-                            f"crop={target_width}:{target_height},subtitles=captions.ass",
-                            "-c:v",
-                            "libx264",
-                            "-preset",
-                            preset,
-                            *(["-crf", crf] if crf else []),
-                            "-b:v",
-                            video_bitrate,
-                            "-maxrate",
-                            maxrate,
-                            "-bufsize",
-                            bufsize,
-                            "-c:a",
-                            "aac",
-                            "-b:a",
-                            audio_bitrate,
-                            output_path,
-                        ],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        cwd=tmpdir,
-                    )
-            else:
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        input_path,
-                        "-ss",
-                        str(start_sec),
-                        "-to",
-                        str(end_sec),
-                        "-vf",
-                        f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
-                        f"crop={target_width}:{target_height},subtitles=captions.ass",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        preset,
-                        *(["-crf", crf] if crf else []),
-                        "-b:v",
-                        video_bitrate,
-                        "-maxrate",
-                        maxrate,
-                        "-bufsize",
-                        bufsize,
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        audio_bitrate,
-                        output_path,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=tmpdir,
-                )
+            # Input seeking (-ss ANTES de -i) es mucho mas rapido que output seeking
+            # FFmpeg salta directamente al punto de corte sin procesar frames anteriores
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",                  # INPUT SEEKING - salta directo al timestamp
+                    str(start_sec),
+                    "-i",
+                    presigned_url,          # Streaming directo desde MinIO
+                    "-t",                   # Duracion (en lugar de -to que es timestamp absoluto)
+                    str(duration_sec),
+                    "-vf",
+                    f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+                    f"crop={target_width}:{target_height}",  # subtitles desactivados temporalmente: ,subtitles=captions.ass
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    preset,
+                    *(["-crf", crf] if crf else []),
+                    "-b:v",
+                    video_bitrate,
+                    "-maxrate",
+                    maxrate,
+                    "-bufsize",
+                    bufsize,
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    audio_bitrate,
+                    output_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=tmpdir,
+            )
 
             object_key = f"clips/{clip.id}/{uuid4().hex}.mp4"
             upload_object(output_path, object_key, "video/mp4")

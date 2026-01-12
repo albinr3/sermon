@@ -3,10 +3,8 @@
 export default function SuggestedClipsPanel({
   useLlmSuggestions,
   onToggleUseLlm,
-  llmMethod,
-  onSelectLlmMethod,
-  llmProvider,
-  onSelectLlmProvider,
+  fullContextPromptVersion,
+  onSelectFullContextPromptVersion,
   onSuggest,
   onDeleteSuggestions,
   onToggleTokenStats,
@@ -63,43 +61,51 @@ export default function SuggestedClipsPanel({
                 disabled={suggesting}
                 className="h-4 w-4 rounded border-[color:var(--line)] bg-[color:var(--surface)] text-[color:var(--accent)]"
               />
-              Usar IA para sugerir clips
+              Usar IA para sugerir clips (Full Context + OpenAI)
             </label>
             {useLlmSuggestions ? (
-              <div className="flex flex-col gap-1 text-xs text-[color:var(--muted)]">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="llm-provider"
-                    value="openai"
-                    checked={llmProvider === "openai"}
-                    onChange={() => onSelectLlmProvider("openai")}
-                    disabled={suggesting}
-                    className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                  />
-                  OpenAI GPT-5 mini
-                </label>
-              </div>
-            ) : null}
-            {useLlmSuggestions ? (
-              <div className="flex flex-col gap-1 text-xs text-[color:var(--muted)]">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="llm-method"
-                    value="full-context"
-                    checked={llmMethod === "full-context"}
-                    onChange={() => onSelectLlmMethod("full-context")}
-                    disabled={suggesting}
-                    className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
-                  />
-                  Full Context - ~60K tokens, $0.012, 120s - Maxima calidad
-                </label>
-              </div>
-            ) : null}
-            {useLlmSuggestions && llmMethod === "full-context" ? (
-              <div className="text-xs text-[#7a4a12]">
-                Warning: ~60K tokens, hasta $0.012 por sermon.
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-1 text-xs text-[color:var(--muted)]">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="prompt-version"
+                      value="v1"
+                      checked={fullContextPromptVersion === "v1"}
+                      onChange={() => onSelectFullContextPromptVersion("v1")}
+                      disabled={suggesting}
+                      className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
+                    />
+                    Prompt v1 (30-120s)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="prompt-version"
+                      value="v2"
+                      checked={fullContextPromptVersion === "v2"}
+                      onChange={() => onSelectFullContextPromptVersion("v2")}
+                      disabled={suggesting}
+                      className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
+                    />
+                    Prompt v2 (Text Anchor Matching)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="prompt-version"
+                      value="v3"
+                      checked={fullContextPromptVersion === "v3"}
+                      onChange={() => onSelectFullContextPromptVersion("v3")}
+                      disabled={suggesting}
+                      className="h-4 w-4 border-[color:var(--line)] text-[color:var(--accent)]"
+                    />
+                    Prompt v3 (Utterance IDs + ceil/floor fallback)
+                  </label>
+                </div>
+                <div className="text-xs text-[#7a4a12]">
+                  Warning: ~60K tokens, hasta $0.012 por sermon.
+                </div>
               </div>
             ) : null}
             <button

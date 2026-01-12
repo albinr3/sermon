@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://sermon:sermon@localhost:5432/sermon"
 
     s3_endpoint: str = "http://localhost:9000"
+    s3_public_endpoint: str | None = None
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
     s3_bucket: str = "sermon"
@@ -28,6 +30,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str | None = None
     openai_base_url: str | None = None
+    assemblyai_api_key: str | None = Field(default=None, validation_alias="ASSEMBLYAI_API")
     celery_max_retries: int = 5
     celery_retry_backoff_base: int = 5
     celery_retry_backoff_max: int = 300
@@ -35,6 +38,7 @@ class Settings(BaseSettings):
     celery_default_priority: int = 5
     celery_priority_render_preview: int = 8
     celery_priority_render_final: int = 4
+    force_regenerate_utterances: bool = False
 
 
 settings = Settings()

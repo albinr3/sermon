@@ -15,17 +15,29 @@ Monorepo con:
 ## Configuracion (.env)
 Configura el archivo `.env` en la raiz. Variables clave:
 - `DATABASE_URL`, `REDIS_URL`
-- `S3_ENDPOINT` (API/worker locales), `S3_INTERNAL_ENDPOINT` (solo Docker), `S3_PUBLIC_ENDPOINT`
+- `S3_ENDPOINT` (API/worker locales), `S3_INTERNAL_ENDPOINT` (solo Docker), `S3_PUBLIC_ENDPOINT` (para AssemblyAI con ngrok)
 - `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
+- `ASSEMBLYAI_API` (API key de AssemblyAI)
 - `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `NEXT_PUBLIC_API_URL`
 - `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB` (default `2048`)
 - `NEXT_PUBLIC_POLL_INTERVAL_MS` (default `5000`)
 - `USE_LLM_FOR_CLIP_SUGGESTIONS` (default `false`)
-- `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`
-- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` (ej: `OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_MODEL=gpt-5-mini`)
+- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` (requerido para sugerencias IA, ej: `OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_MODEL=gpt-5-mini`)
 - `NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS` (default `false`, solo UI)
 - `CELERY_*` (concurrency por queue, retries y prioridades)
+
+### AssemblyAI (desarrollo local)
+
+AssemblyAI funciona con archivos locales, no requiere configuración adicional. Solo necesitas:
+
+1. Agregar en `.env`:
+   ```
+   ASSEMBLYAI_API=tu_api_key_de_assemblyai
+   ```
+2. Reiniciar el worker de Celery
+
+El sistema descarga el archivo desde MinIO localmente y lo envía directamente a AssemblyAI, sin necesidad de URLs públicas.
 
 ## Levantar infra (Docker)
 
@@ -56,7 +68,8 @@ Nota: requiere ffmpeg instalado y accesible en PATH.
 ```bash
 cd apps/worker
 pip install -r requirements.txt
-celery -A src.celery_app worker --loglevel=info --queues default,transcriptions,suggestions,embeddings,previews,renders -P solo
+
+celery -A src.celery_app worker --loglevel=info --queues default,transcriptions,suggestions,embeddings,previews,renders -P threads --concurrency=4
 ```
 
 Web (Next.js, desde la raiz del repo):
@@ -84,7 +97,7 @@ Flower: http://localhost:5555 (opcional)
 - `POST /sermons/{id}/retry-transcription` - Reintenta transcripción fallida
 - `GET /sermons/{id}/segments` - Lista segmentos de transcripción
 - `GET /sermons/{id}/transcript-stats` - Estadísticas de transcripción (palabras, caracteres)
-- `POST /sermons/{id}/suggest` - Genera sugerencias de clips (query params: `use_llm`, `llm_method`, `llm_provider`)
+- `POST /sermons/{id}/suggest` - Genera sugerencias de clips (query params: `use_llm`, `full_context_prompt_version`)
 - `GET /sermons/{id}/suggestions` - Lista clips sugeridos con scores
 - `DELETE /sermons/{id}/suggestions` - Elimina todas las sugerencias de un sermon
 - `GET /sermons/{id}/token-stats` - Estadísticas de uso de tokens LLM por método
@@ -106,45 +119,39 @@ Flower: http://localhost:5555 (opcional)
 - Las URLs firmadas (presigned PUT/GET) de MinIO expiran a los 3600s (1h).
 - La UI valida el tamano maximo de archivo con `NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB`.
 
-## LLM para sugerencias (4 métodos disponibles)
-El sistema ofrece múltiples métodos para generar sugerencias de clips con IA:
+## LLM para sugerencias
+El sistema usa **Full-context** con **OpenAI** para generar sugerencias de clips con IA:
 
-### 1. **Scoring** (default)
-- Genera candidatos con heurísticas y los re-scorea con LLM
-- Combina score heurístico (0.3) + score LLM (0.7)
-- Más eficiente en tokens, ideal para refinamiento rápido
+### Método: Full-context
+- El LLM analiza **toda la transcripción en una sola llamada**
+- **Máxima comprensión contextual**, mejores decisiones holísticas
+- Ideal para sermones complejos con temas interrelacionados
+- Genera clips con coherencia temática superior
+- **Más costoso** en tokens (~60K tokens, ~$0.012 por sermon) pero mejor calidad
 
-### 2. **Selection**
-- El LLM selecciona los mejores clips desde candidatos heurísticos
-- Usa ventanas deslizantes para analizar contexto limitado
-- Puede sugerir recortes (`trim_suggestion`)
-- Balance entre calidad y costo
+### Proveedor: OpenAI
+- Usa **OpenAI** (GPT-5 mini) como proveedor exclusivo
+- Configuración requerida: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`
 
-### 3. **Generation**
-- El LLM genera clips desde cero usando la transcripción completa
-- No depende de heurísticas, máxima libertad creativa
-- Puede crear clips más originales pero usa más tokens
+### Versiones de prompt
+- **v1**: Clips de 30-120 segundos (default)
+- **v2**: Clips de 30-50 segundos, optimizado para TikTok/Reels/Shorts
 
-### 4. **Full-context**
-- El LLM analiza la transcripción completa en una sola llamada
-- Máxima comprensión contextual, mejores decisiones
-- Más costoso en tokens pero mejor calidad
-- Ideal para sermones complejos o cuando la calidad es prioritaria
-
-### Características comunes
-- Soporta **Deepseek** y **OpenAI** (GPT-5 mini) como proveedores
+### Características
 - Tracking de uso de tokens: prompt, completion, cache hits/misses
-- Estimación de costos por método
-- Estadísticas comparativas disponibles en `/sermons/{id}/token-stats`
+- Estimación de costos por sugerencia
+- Estadísticas disponibles en `/sermons/{id}/token-stats`
 - Fallback automático a heurísticas si falla LLM
 - Dedupe por solapamiento (>60%) y semántico (si hay embeddings)
 - Las sugerencias muestran badge "IA" en la UI
+- La UI permite seleccionar versión de prompt (v1/v2) cuando se activa IA
 
 ## Actualizaciones recientes
-- **4 métodos LLM**: scoring, selection, generation, full-context
-- **Tracking de tokens**: uso, cache, costos estimados por método
+- **Método único LLM**: Full-context con OpenAI (simplificación de UI)
+- **Tracking de tokens**: uso, cache, costos estimados
+- **Versiones de prompt**: v1 (30-120s) y v2 (30-50s optimizado para redes sociales)
 - **Retry de transcripción**: reintentar transcripciones fallidas
-- **Estadísticas detalladas**: tokens, costos y comparativas entre métodos
+- **Estadísticas detalladas**: tokens y costos por sugerencia
 - **Sugerencias mejoradas**: dedupe semántico, clasificación por tipo de segmento
 - **Acciones sobre sugerencias**: aceptar, feedback, aplicar trim sugerido
 - **Soft delete en cascada**: eliminar sermon borra clips, segmentos y embeddings
@@ -152,11 +159,33 @@ El sistema ofrece múltiples métodos para generar sugerencias de clips con IA:
 
 ## Alembic
 
+### Aplicar migraciones
+
 ```bash
 cd apps/api
 alembic upgrade head
 ```
 En el enfoque hibrido, corre este comando antes de levantar la API.
+
+### Resetear base de datos completamente
+
+Para borrar **toda** la base de datos (tablas, tipos ENUM, historial de Alembic) y empezar desde cero:
+
+**Opción 1: Script Python (recomendado)**
+
+```bash
+cd apps/api
+python reset_db.py
+alembic upgrade head
+```
+
+
+Luego ejecutar las migraciones:
+
+```bash
+cd apps/api
+alembic upgrade head
+```
 
 ## Detalle de funcionamiento
 Consulta docs/DETALLE.md para ver el flujo completo.

@@ -31,3 +31,24 @@ def upload_object(source_path: str, object_key: str, content_type: str) -> None:
             object_key,
             ExtraArgs={"ContentType": content_type},
         )
+
+
+def create_presigned_get_url(object_key: str, expires_in: int, use_public_endpoint: bool = True) -> str:
+    # Por defecto usa endpoint público para AssemblyAI (necesita acceso desde internet)
+    # use_public_endpoint=False para uso local
+    endpoint_url = settings.s3_public_endpoint if use_public_endpoint and settings.s3_public_endpoint else settings.s3_endpoint
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=settings.s3_access_key,
+        aws_secret_access_key=settings.s3_secret_key,
+        region_name=settings.s3_region,
+        use_ssl=settings.s3_use_ssl,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+    params = {"Bucket": settings.s3_bucket, "Key": object_key}
+    return client.generate_presigned_url(
+        "get_object",
+        Params=params,
+        ExpiresIn=expires_in,
+    )

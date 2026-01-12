@@ -48,52 +48,35 @@ La UI los muestra para seleccionar rangos de clip.
 - Particionado: si `transcript_segments` crece mucho, considerar particionar por `sermon_id` o rango de fechas para mantener queries y indices livianos.
 
 ## Sugerencias de clips (worker)
-Flujo de sugerencias con 4 métodos LLM:
+Flujo de sugerencias con método **Full-context** y proveedor **OpenAI**:
 
-### Métodos disponibles
+### Método: Full-context
+1) La UI llama `POST /sermons/{id}/suggest?use_llm=true&full_context_prompt_version=v1|v2`.
+2) La API encola `worker.suggest_clips(sermon_id, use_llm=True, llm_method="full-context", llm_provider="openai", full_context_prompt_version="v1")`.
+3) El LLM analiza **toda la transcripción en una sola llamada**.
+4) **Máxima comprensión contextual**, mejores decisiones holísticas.
+5) Ideal para sermones complejos con temas interrelacionados.
+6) Genera clips con coherencia temática superior.
+7) **Más costoso** en tokens (~60K tokens, ~$0.012 por sermon) pero mejor calidad.
+8) **Dedupe**: solapamiento (>60%) y semántico (si hay embeddings).
+9) Se guardan en `clips` con `source=auto`, `score`, `rationale`, `use_llm`, `llm_method="full-context"`, `llm_provider="openai"`.
 
-#### 1. Scoring (default)
-1) La UI llama `POST /sermons/{id}/suggest?use_llm=true&llm_method=scoring&llm_provider=deepseek|openai`.
-2) La API encola `worker.suggest_clips(sermon_id, use_llm=True, llm_method="scoring", llm_provider="deepseek")`.
-3) **Heurística**: combina segmentos para clips de 30s a 120s, prioriza:
-   - Inicios y finales limpios (silencios/puntuación)
-   - Hooks avanzados (preguntas, imperativos, estadísticas)
-   - Duración óptima y variedad
-   - Clasificación semántica por tipo (story, teaching, call-to-action, etc.)
-4) **LLM Re-scoring**: el proveedor seleccionado (Deepseek o OpenAI) evalúa cada candidato y asigna scores.
-5) **Score final**: 0.3 heurística + 0.7 LLM.
-6) **Dedupe**: solapamiento (>60%) y semántico (si hay embeddings).
-7) Se guardan en `clips` con `source=auto`, `score`, `rationale`, `use_llm`, `llm_method`, `llm_provider`.
+### Versiones de prompt
+- **v1** (default): Genera clips de 30-120 segundos, ideal para contenido general.
+- **v2**: Genera clips de 30-50 segundos, optimizado para TikTok/Reels/Shorts.
 
-#### 2. Selection
-1) Similar a scoring pero el LLM **selecciona** los mejores clips en lugar de solo scorear.
-2) Usa **ventanas deslizantes** para analizar contexto limitado (3000 palabras por ventana).
-3) Puede sugerir **recortes** (`trim_suggestion`): start_offset_sec, end_offset_sec.
-4) **Backfill**: si el LLM no genera suficientes clips, completa con heurísticas.
-5) Balance entre calidad y costo de tokens.
+### Proveedor: OpenAI
+- Usa exclusivamente **OpenAI** (GPT-5 mini).
+- Requiere configuración: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`.
+- Tracking de tokens: prompt_tokens, completion_tokens, total_tokens, cache_hit_tokens, cache_miss_tokens.
+- Estimación de costos: calcula costo en USD por sugerencia.
 
-#### 3. Generation
-1) El LLM **genera clips desde cero** usando la transcripción completa.
-2) **No depende de heurísticas**, máxima libertad creativa.
-3) Puede crear clips más originales basados en comprensión profunda del contenido.
-4) Usa más tokens que selection debido a análisis completo.
-5) También puede sugerir recortes y proporciona rationale detallado.
-
-#### 4. Full-context
-1) El LLM analiza **toda la transcripción en una sola llamada**.
-2) **Máxima comprensión contextual**, mejores decisiones holísticas.
-3) Ideal para sermones complejos con temas interrelacionados.
-4) **Más costoso** en tokens pero mejor calidad.
-5) Genera clips con coherencia temática superior.
-
-### Características comunes
+### Características
 - **Fallback automático**: si el LLM falla o no está configurado, usa heurísticas.
-- **Tracking de tokens**: prompt_tokens, completion_tokens, total_tokens, cache_hit_tokens, cache_miss_tokens.
-- **Estimación de costos**: calcula costo en USD por método.
 - **Dedupe inteligente**: por solapamiento (>60%) y semántico (embeddings).
 - **Clasificación semántica**: story, teaching, call-to-action, testimony, prayer.
-- **Logs detallados**: IA log con prompts, respuestas y métricas.
-- **Estadísticas comparativas**: endpoint `/sermons/{id}/token-stats` compara métodos.
+- **Logs detallados**: archivo `logIA` captura prompts, respuestas y métricas.
+- **Estadísticas**: endpoint `/sermons/{id}/token-stats` muestra uso de tokens y costos.
 
 ## Clips (worker)
 Flujo para crear un clip:
@@ -158,13 +141,13 @@ Clip (`ClipSource`):
   - `char_count`: total de caracteres
 - `POST /sermons/{id}/suggest` - Genera sugerencias con params:
   - `use_llm`: true/false (default: config)
-  - `llm_method`: scoring|selection|generation|full-context
-  - `llm_provider`: deepseek|openai
+  - `full_context_prompt_version`: v1|v2 (default: v1)
+  - Nota: siempre usa método `full-context` con proveedor `openai`
 - `GET /sermons/{id}/suggestions` - Lista clips sugeridos ordenados por score
 - `DELETE /sermons/{id}/suggestions` - Elimina todas las sugerencias y su feedback
 - `GET /sermons/{id}/token-stats` - Estadísticas de uso LLM:
-  - Por método: clips, tokens (prompt/completion/total), costos, cache
-  - Comparaciones entre métodos (delta de tokens/costos, % incremento)
+  - Tokens (prompt/completion/total), costos, cache hits/misses
+  - Método: full-context, Proveedor: OpenAI
 - `POST /sermons/{id}/embed` - Encola generación de embeddings
 - `GET /sermons/{id}/search` - Búsqueda semántica:
   - `q`: query de búsqueda
@@ -293,12 +276,10 @@ Variables clave:
 
 ### LLM y IA
 - `USE_LLM_FOR_CLIP_SUGGESTIONS`: habilitar LLM por default (default: false)
-- `DEEPSEEK_API_KEY`: API key de Deepseek
-- `DEEPSEEK_MODEL`: modelo de Deepseek (ej: deepseek-chat)
-- `DEEPSEEK_BASE_URL`: endpoint de Deepseek
-- `OPENAI_API_KEY`: API key de OpenAI
+- `OPENAI_API_KEY`: API key de OpenAI (requerido para sugerencias IA)
 - `OPENAI_MODEL`: modelo de OpenAI (ej: gpt-5-mini)
 - `OPENAI_BASE_URL`: endpoint de OpenAI (ej: https://api.openai.com/v1)
+- Nota: El sistema usa exclusivamente OpenAI con método full-context
 
 ### Frontend (Next.js)
 - `NEXT_PUBLIC_API_URL`: URL de la API (ej: http://localhost:8000)
@@ -319,11 +300,10 @@ Variables clave:
 - **Polling**: la web hace polling cada 5s cuando un sermon o clip está en estado activo (configurable con `NEXT_PUBLIC_POLL_INTERVAL_MS`).
 - **Progreso**: se muestra en dashboard y vista de detalle con barra de progreso (0-100%).
 - **Sugerencias IA**: 
-  - Checkbox "Usar IA para sugerir clips"
-  - Selector de método: Scoring, Selection, Generation, Full-context
-  - Selector de proveedor: Deepseek, OpenAI
+  - Checkbox "Usar IA para sugerir clips (Full Context + OpenAI)"
+  - Selector de versión de prompt: v1 (30-120s) o v2 (30-50s optimizado para redes sociales)
   - Badge "IA" en sugerencias generadas con LLM
-  - Muestra método usado (ej: "Full-context")
+  - Siempre usa método Full-context con OpenAI
 - **Estados visuales**:
   - "Subiendo..." durante upload
   - "Transcribiendo..." con % de progreso
@@ -343,6 +323,6 @@ Variables clave:
   - Filtrar por status y tags
   - Búsqueda semántica en transcripciones
 - **Estadísticas**:
-  - Ver uso de tokens por método
-  - Comparar costos entre métodos
+  - Ver uso de tokens (prompt, completion, cache hits/misses)
+  - Ver costos estimados por sugerencia
   - Estadísticas de transcripción (palabras, caracteres)

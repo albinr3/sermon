@@ -180,8 +180,10 @@ export default function SermonDetail({ params }) {
   const [useLlmSuggestions, setUseLlmSuggestions] = useState(
     process.env.NEXT_PUBLIC_DEFAULT_USE_LLM_FOR_CLIPS === "true"
   );
-  const [llmMethod, setLlmMethod] = useState("full-context");
-  const [llmProvider, setLlmProvider] = useState("openai");
+  // Fijado: siempre usar full-context y openai
+  const llmMethod = "full-context";
+  const llmProvider = "openai";
+  const [fullContextPromptVersion, setFullContextPromptVersion] = useState("v1");
   const [actionLoading, setActionLoading] = useState({});
   const [editingSuggestion, setEditingSuggestion] = useState(null);
   const [suggestionClipMap, setSuggestionClipMap] = useState({});
@@ -229,8 +231,6 @@ export default function SermonDetail({ params }) {
     setSuggestionsProgress(0);
     setPreviewClip(null);
     setIsTranscriptOpen(false);
-    setLlmMethod("full-context");
-    setLlmProvider("openai");
     setMetadataDraft({
       title: "",
       description: "",
@@ -760,7 +760,7 @@ export default function SermonDetail({ params }) {
       : "";
 
   const suggestMutation = useMutation({
-    mutationFn: () => suggestClips(sermonId, useLlmSuggestions, llmMethod, llmProvider),
+    mutationFn: () => suggestClips(sermonId, useLlmSuggestions, llmMethod, llmProvider, fullContextPromptVersion),
     onMutate: () => {
       setSuggestionsPending(true);
       setSuggestionsError("");
@@ -1535,10 +1535,8 @@ export default function SermonDetail({ params }) {
       <SuggestedClipsPanel
         useLlmSuggestions={useLlmSuggestions}
         onToggleUseLlm={setUseLlmSuggestions}
-        llmMethod={llmMethod}
-        onSelectLlmMethod={setLlmMethod}
-        llmProvider={llmProvider}
-        onSelectLlmProvider={setLlmProvider}
+        fullContextPromptVersion={fullContextPromptVersion}
+        onSelectFullContextPromptVersion={setFullContextPromptVersion}
         onSuggest={handleSuggest}
         onDeleteSuggestions={handleDeleteSuggestions}
         onToggleTokenStats={handleToggleTokenStats}

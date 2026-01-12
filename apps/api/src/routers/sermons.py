@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 def create_sermon(
     payload: SermonCreate, session: Session = Depends(get_session)
 ) -> SermonCreateResponse:
+    logger.info("Creating sermon with transcription_model: %s", payload.transcription_model)
     sermon = Sermon(
         title=payload.title,
         description=payload.description,
@@ -51,6 +52,7 @@ def create_sermon(
         sermon_date=payload.sermon_date,
         tags=payload.tags,
         language=payload.language,
+        transcription_model=payload.transcription_model,
         progress=0,
     )
     session.add(sermon)
@@ -371,12 +373,51 @@ def suggest_clips(
     llm_provider: str = Query(
         "deepseek", regex="^(deepseek|openai)$"
     ),
+    full_context_prompt_version: str = Query(
+        "v1", regex="^(v1|v2|v3)$"
+    ),
     session: Session = Depends(get_session),
 ) -> SuggestClipsResponse:
     """Enqueue clip suggestions using LLM scoring or LLM selection."""
     sermon = session.get(Sermon, sermon_id)
     if not sermon or sermon.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sermon not found")
+
+    # Validar word timestamps para v3 (validación síncrona para mostrar error inmediato)
+    if full_context_prompt_version == "v3":
+        segments_query = (
+            select(TranscriptSegment)
+            .where(
+                TranscriptSegment.sermon_id == sermon_id,
+                TranscriptSegment.deleted_at.is_(None),
+            )
+            .order_by(TranscriptSegment.start_ms.asc())
+        )
+        segments = list(session.execute(segments_query).scalars().all())
+        
+        if segments:
+            segments_with_word_timestamps = [
+                s for s in segments 
+                if s.word_timestamps_json is not None and len(s.word_timestamps_json) > 0
+            ]
+            
+            if not segments_with_word_timestamps:
+                error_msg = (
+                    "v3 requiere word timestamps exactos de AssemblyAI. "
+                    "Este sermon no tiene word timestamps. "
+                    "Usa AssemblyAI para transcribir o usa v1/v2 que no requieren word timestamps."
+                )
+                raise HTTPException(status_code=400, detail=error_msg)
+            
+            # Verificar que al menos el 80% de los segments tengan word timestamps
+            coverage = len(segments_with_word_timestamps) / len(segments) if segments else 0
+            if coverage < 0.8:
+                error_msg = (
+                    f"v3 requiere word timestamps exactos. "
+                    f"Solo {coverage*100:.1f}% de los segments tienen word timestamps. "
+                    f"Usa AssemblyAI para transcribir o usa v1/v2."
+                )
+                raise HTTPException(status_code=400, detail=error_msg)
 
     try:
         use_llm_effective = (
@@ -385,7 +426,12 @@ def suggest_clips(
         celery_app.send_task(
             "worker.suggest_clips",
             args=[sermon.id],
-            kwargs={"use_llm": use_llm_effective, "llm_method": llm_method, "llm_provider": llm_provider},
+            kwargs={
+                "use_llm": use_llm_effective,
+                "llm_method": llm_method,
+                "llm_provider": llm_provider,
+                "full_context_prompt_version": full_context_prompt_version,
+            },
             priority=settings.celery_priority_suggest,
         )
     except Exception as exc:

@@ -52,6 +52,8 @@ class Sermon(Base):
     sermon_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    transcription_model: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    video_duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
@@ -90,6 +92,27 @@ class TranscriptSegment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sermon_id: Mapped[int] = mapped_column(ForeignKey("sermons.id"), index=True)
+    start_ms: Mapped[int] = mapped_column(Integer)
+    end_ms: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    word_timestamps_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)  # Para v3: timestamps exactos de palabras
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class TranscriptUtterance(Base):
+    __tablename__ = "transcript_utterances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sermon_id: Mapped[int] = mapped_column(ForeignKey("sermons.id"), index=True)
+    idx: Mapped[int] = mapped_column(Integer, index=True)
     start_ms: Mapped[int] = mapped_column(Integer)
     end_ms: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)

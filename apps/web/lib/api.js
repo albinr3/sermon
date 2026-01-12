@@ -73,10 +73,10 @@ export async function listSermons({ limit, offset, q, status, tag } = {}) {
   return apiFetch(`/sermons/${query ? `?${query}` : ""}`, {}, sermonListSchema);
 }
 
-export async function createSermon(filename, language) {
+export async function createSermon(filename, language, transcription_model) {
   return apiFetch("/sermons/", {
     method: "POST",
-    body: JSON.stringify({ filename, language })
+    body: JSON.stringify({ filename, language, transcription_model })
   }, createSermonResponseSchema);
 }
 
@@ -144,7 +144,7 @@ export async function createClip({ sermon_id, start_ms, end_ms, render_type }) {
   }, clipSchema);
 }
 
-export async function suggestClips(id, useLlm, llmMethod = "full-context", llmProvider = "openai") {
+export async function suggestClips(id, useLlm, llmMethod = "full-context", llmProvider = "openai", fullContextPromptVersion = "v1") {
   const params = new URLSearchParams();
   if (typeof useLlm === "boolean") {
     params.set("use_llm", String(useLlm));
@@ -154,6 +154,9 @@ export async function suggestClips(id, useLlm, llmMethod = "full-context", llmPr
   }
   if (llmProvider) {
     params.set("llm_provider", llmProvider);
+  }
+  if (llmMethod === "full-context" && fullContextPromptVersion) {
+    params.set("full_context_prompt_version", fullContextPromptVersion);
   }
   const query = params.toString();
   return apiFetch(`/sermons/${id}/suggest${query ? `?${query}` : ""}`, {
